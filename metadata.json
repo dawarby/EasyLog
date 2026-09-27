@@ -1,0 +1,10 @@
+{
+  "name": "EasyLogAuto",
+  "description": "Effortlessly track your vehicle mileage using AI. Snap a photo of your odometer to automatically log start and end distances for your trips.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

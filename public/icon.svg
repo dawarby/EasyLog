@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#4f46e5" />
+      <stop offset="100%" stop-color="#312e81" />
+    </linearGradient>
+    <linearGradient id="arcGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="50%" stop-color="#34d399" />
+      <stop offset="100%" stop-color="#f43f5e" />
+    </linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)" />
+  
+  <!-- Outer Speedometer Arc -->
+  <circle cx="256" cy="270" r="160" fill="none" stroke="#1e1b4b" stroke-width="26" opacity="0.6" />
+  <circle cx="256" cy="270" r="160" fill="none" stroke="url(#arcGrad)" stroke-width="24" stroke-dasharray="750" stroke-dashoffset="240" stroke-linecap="round" />
+  
+  <!-- Gauge Ticks -->
+  <g stroke="#ffffff" stroke-width="4" opacity="0.75" stroke-linecap="round">
+    <line x1="126" y1="270" x2="146" y2="270" />
+    <line x1="145" y1="180" x2="161" y2="192" />
+    <line x1="195" y1="128" x2="205" y2="146" />
+    <line x1="256" y1="110" x2="256" y2="130" />
+    <line x1="317" y1="128" x2="307" y2="146" />
+    <line x1="367" y1="180" x2="351" y2="192" />
+    <line x1="386" y1="270" x2="366" y2="270" />
+  </g>
+  
+  <!-- Odometer Digital Display Box -->
+  <rect x="156" y="325" width="200" height="54" rx="10" fill="#0f172a" stroke="#64748b" stroke-width="3" />
+  <g fill="#38bdf8" font-family="monospace" font-weight="bold" font-size="28" text-anchor="middle">
+    <text x="180" y="362">0</text>
+    <text x="218" y="362">4</text>
+    <text x="256" y="362">5</text>
+    <text x="294" y="362">2</text>
+    <text x="332" y="362">0</text>
+  </g>
+  
+  <!-- Needle -->
+  <polygon points="252,270 260,270 295,175 256,170" fill="#f43f5e" />
+  
+  <!-- Hub -->
+  <circle cx="256" cy="270" r="28" fill="#ffffff" />
+  <circle cx="256" cy="270" r="16" fill="#38bdf8" />
+</svg>
