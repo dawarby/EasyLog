@@ -29,6 +29,18 @@ export interface Trip {
   endLocation?: LocationPoint;
   routeCoordinates?: [number, number][];
   triggerSource?: 'manual' | 'bluetooth' | 'shortcut';
+  isCalibration?: boolean;
+  calibrationDrift?: number; // Physical reading - app estimated reading
+  calibrationReason?: string;
+}
+
+export interface VehicleCalibrationStatus {
+  vehicleReg: string;
+  lastCalibrationDate: string | null;
+  lastCalibrationOdometer: number | null;
+  daysSinceLastCalibration: number;
+  isOverdue: boolean;
+  intervalDays: number;
 }
 
 export interface BluetoothConfig {
@@ -44,6 +56,21 @@ export interface TrackingSettings {
   keepScreenAwake: boolean;
   highAccuracy: boolean;
   autoStopAlert: boolean;
+}
+
+export interface SavedLocation {
+  name: string;
+  address: string;
+  latitude: number | null;
+  longitude: number | null;
+  radiusMeters: number; // Geofence radius in meters, default 250m
+}
+
+export interface HomeWorkConfig {
+  home: SavedLocation;
+  work: SavedLocation;
+  autoDetectHomeAsPersonal: boolean;
+  autoDetectWorkAsBusiness: boolean;
 }
 
 export interface Backup {

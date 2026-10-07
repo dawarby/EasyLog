@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Check, X, MapPin, Gauge, Clock, Briefcase, User, Car, ArrowRight, Edit3, Sparkles, Zap } from 'lucide-react';
+import { Check, X, MapPin, Gauge, Clock, Briefcase, User, Car, ArrowRight, Edit3, Sparkles, Zap, Navigation } from 'lucide-react';
 import { Trip, LocationPoint } from '../types';
-import { formatDuration } from '../services/gpsService';
+import { formatDuration, reverseGeocode, isPlaceholderAddress } from '../services/gpsService';
 import { predictTripTag, TripPrediction } from '../services/predictiveTaggingService';
 
 interface GpsEndModalProps {
@@ -37,17 +37,50 @@ export const GpsEndModal: React.FC<GpsEndModalProps> = ({
   const [notes, setNotes] = useState<string>(trip.notes || '');
   const [tripType, setTripType] = useState<'work' | 'personal'>(trip.tripType || 'work');
   const [isEditingOdo, setIsEditingOdo] = useState<boolean>(false);
+  const [startAddress, setStartAddress] = useState<string>(trip.startLocation?.address || trip.start?.location?.address || '');
+  const [endAddress, setEndAddress] = useState<string>(endLocation?.address || '');
+  const [isEditingAddresses, setIsEditingAddresses] = useState<boolean>(false);
   const [prediction, setPrediction] = useState<TripPrediction | null>(null);
   const [isPredicting, setIsPredicting] = useState<boolean>(false);
   const [appliedPrediction, setAppliedPrediction] = useState<boolean>(false);
 
   useEffect(() => {
     if (!isOpen) return;
+
+    // 1. Resolve start address if it was missing or still placeholder
+    const currentStart = trip.startLocation?.address || trip.start?.location?.address || '';
+    const startLat = trip.startLocation?.latitude || trip.start?.location?.latitude;
+    const startLon = trip.startLocation?.longitude || trip.start?.location?.longitude;
+
+    if (isPlaceholderAddress(currentStart) && startLat && startLon && startLat !== 0 && startLon !== 0) {
+      reverseGeocode(startLat, startLon).then((addr) => {
+        if (addr && !isPlaceholderAddress(addr)) {
+          setStartAddress(addr);
+        }
+      });
+    } else if (currentStart) {
+      setStartAddress(currentStart);
+    }
+
+    // 2. Resolve end address if missing or placeholder
+    const currentEnd = endLocation?.address || '';
+    if (isPlaceholderAddress(currentEnd) && endLocation?.latitude && endLocation?.longitude && endLocation.latitude !== 0) {
+      reverseGeocode(endLocation.latitude, endLocation.longitude).then((addr) => {
+        if (addr && !isPlaceholderAddress(addr)) {
+          setEndAddress(addr);
+        }
+      });
+    } else if (currentEnd) {
+      setEndAddress(currentEnd);
+    }
+
     setIsPredicting(true);
     predictTripTag(
       {
         startAddress: trip.startLocation?.address,
         endAddress: endLocation?.address,
+        startLocation: trip.startLocation,
+        endLocation: endLocation || undefined,
         distance: roundedDist,
         startTime: trip.start.timestamp,
         vehicle: trip.registrationNumber,
@@ -90,6 +123,19 @@ export const GpsEndModal: React.FC<GpsEndModalProps> = ({
     const finalEndOdo = parseInt(endOdo, 10) || calculatedEndOdo;
     const finalDist = parseFloat(distance) || roundedDist;
 
+    const resolvedStartPoint: LocationPoint | undefined = trip.startLocation ? {
+      ...trip.startLocation,
+      address: startAddress.trim() || trip.startLocation.address
+    } : (trip.start?.location ? {
+      ...trip.start.location,
+      address: startAddress.trim() || trip.start.location.address
+    } : undefined);
+
+    const resolvedEndPoint: LocationPoint | undefined = endLocation ? {
+      ...endLocation,
+      address: endAddress.trim() || endLocation.address
+    } : undefined;
+
     const completed: Trip = {
       ...trip,
       status: 'completed',
@@ -97,12 +143,17 @@ export const GpsEndModal: React.FC<GpsEndModalProps> = ({
       tripType,
       clientName: clientName.trim(),
       notes: notes.trim(),
+      start: {
+        ...trip.start,
+        location: resolvedStartPoint
+      },
+      startLocation: resolvedStartPoint,
       end: {
         value: finalEndOdo,
         timestamp: new Date().toISOString(),
-        location: endLocation || undefined
+        location: resolvedEndPoint
       },
-      endLocation: endLocation || undefined
+      endLocation: resolvedEndPoint
     };
 
     onSave(completed);
@@ -199,23 +250,60 @@ export const GpsEndModal: React.FC<GpsEndModalProps> = ({
           </div>
 
           {/* Route Locations */}
-          <div className="space-y-2 text-xs">
-            <div className="flex items-start space-x-2">
-              <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 mt-1 shrink-0" />
-              <div className="flex-1">
-                <div className="text-[10px] text-gray-400 font-semibold uppercase">Started at</div>
-                <div className="text-gray-800 font-medium truncate">
-                  {trip.startLocation?.address || 'Start Location'}
+          <div className="bg-gray-50 border border-gray-200 rounded-xl p-3.5 space-y-3">
+            <div className="flex justify-between items-center">
+              <span className="text-xs font-bold text-gray-700 uppercase tracking-wider flex items-center">
+                <MapPin size={14} className="mr-1.5 text-emerald-600" />
+                Route Addresses
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsEditingAddresses(!isEditingAddresses)}
+                className="text-[11px] text-indigo-600 font-medium hover:underline flex items-center"
+              >
+                <Edit3 size={11} className="mr-1" />
+                {isEditingAddresses ? 'Done' : 'Edit'}
+              </button>
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <div className="flex items-start space-x-2">
+                <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 mt-1 shrink-0" />
+                <div className="flex-1 overflow-hidden">
+                  <div className="text-[10px] text-gray-400 font-semibold uppercase">Started at</div>
+                  {isEditingAddresses ? (
+                    <input
+                      type="text"
+                      value={startAddress}
+                      onChange={(e) => setStartAddress(e.target.value)}
+                      placeholder="Start address..."
+                      className="w-full mt-0.5 px-2 py-1 text-xs border border-gray-300 rounded bg-white text-gray-900 focus:ring-1 focus:ring-emerald-500 focus:outline-none"
+                    />
+                  ) : (
+                    <div className="text-gray-800 font-medium truncate">
+                      {startAddress || trip.startLocation?.address || 'Start Location'}
+                    </div>
+                  )}
                 </div>
               </div>
-            </div>
-            <div className="w-0.5 h-4 bg-gray-200 ml-1" />
-            <div className="flex items-start space-x-2">
-              <div className="w-2.5 h-2.5 rounded-full bg-red-500 mt-1 shrink-0" />
-              <div className="flex-1">
-                <div className="text-[10px] text-gray-400 font-semibold uppercase">Finished at</div>
-                <div className="text-gray-800 font-medium truncate">
-                  {endLocation?.address || 'Current Destination'}
+              <div className="w-0.5 h-3 bg-gray-300 ml-1" />
+              <div className="flex items-start space-x-2">
+                <div className="w-2.5 h-2.5 rounded-full bg-red-500 mt-1 shrink-0" />
+                <div className="flex-1 overflow-hidden">
+                  <div className="text-[10px] text-gray-400 font-semibold uppercase">Finished at</div>
+                  {isEditingAddresses ? (
+                    <input
+                      type="text"
+                      value={endAddress}
+                      onChange={(e) => setEndAddress(e.target.value)}
+                      placeholder="Destination address..."
+                      className="w-full mt-0.5 px-2 py-1 text-xs border border-gray-300 rounded bg-white text-gray-900 focus:ring-1 focus:ring-emerald-500 focus:outline-none"
+                    />
+                  ) : (
+                    <div className="text-gray-800 font-medium truncate">
+                      {endAddress || endLocation?.address || 'Current Destination'}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -250,9 +338,16 @@ export const GpsEndModal: React.FC<GpsEndModalProps> = ({
           {/* Purpose & Notes */}
           <div className="space-y-3 pt-2">
             <div>
-              <label className="text-xs font-bold text-gray-700 uppercase tracking-wider mb-1 block">
-                Trip Purpose
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-bold text-gray-700 uppercase tracking-wider block">
+                  Trip Purpose
+                </label>
+                {(prediction?.tags?.includes('ATO Commute') || prediction?.tags?.includes('Home')) && (
+                  <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full">
+                    🏠 Home Commute: Personal
+                  </span>
+                )}
+              </div>
               <div className="grid grid-cols-2 gap-2 bg-gray-100 p-1 rounded-xl">
                 <button
                   type="button"

@@ -34,25 +34,80 @@ export function calculateDistance(
 }
 
 /**
- * Gets current location with promise and timeout.
+ * Gets current location with multi-stage fallback:
+ * 1. High accuracy GPS (satellites) with 6s timeout
+ * 2. Medium/low accuracy (cellular/Wi-Fi positioning) with 8s timeout
+ * 3. IP-based coarse fallback so the app NEVER hangs on "Acquiring GPS..."
  */
-export function getCurrentPosition(highAccuracy = true): Promise<GeolocationPosition> {
-  return new Promise((resolve, reject) => {
-    if (!navigator.geolocation) {
-      reject(new Error('Geolocation is not supported by your browser.'));
-      return;
-    }
+export async function getCurrentPosition(highAccuracy = true): Promise<GeolocationPosition> {
+  if (typeof navigator === 'undefined' || !navigator.geolocation) {
+    throw new Error('Geolocation is not supported by your browser or environment.');
+  }
 
-    navigator.geolocation.getCurrentPosition(
-      (pos) => resolve(pos),
-      (err) => reject(err),
-      {
-        enableHighAccuracy: highAccuracy,
-        timeout: 15000,
-        maximumAge: 10000,
+  // Helper for single navigator.geolocation attempt
+  const attemptGeo = (enableHighAccuracy: boolean, timeoutMs: number): Promise<GeolocationPosition> => {
+    return new Promise((resolve, reject) => {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve(pos),
+        (err) => reject(err),
+        {
+          enableHighAccuracy,
+          timeout: timeoutMs,
+          maximumAge: 15000,
+        }
+      );
+    });
+  };
+
+  // Stage 1: Try high accuracy if requested
+  if (highAccuracy) {
+    try {
+      const pos = await attemptGeo(true, 7000);
+      return pos;
+    } catch (err: any) {
+      console.warn('High-accuracy GPS fix timed out or failed, falling back to network positioning...', err);
+    }
+  }
+
+  // Stage 2: Try network/cell tower coarse geolocation
+  try {
+    const pos = await attemptGeo(false, 9000);
+    return pos;
+  } catch (err: any) {
+    console.warn('Standard geolocation failed, attempting IP-based coarse coordinates...', err);
+  }
+
+  // Stage 3: IP Geolocation fallback (works indoors, on desktops, or in emulators)
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch('https://ipapi.co/json/', { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (res.ok) {
+      const data = await res.json();
+      if (typeof data.latitude === 'number' && typeof data.longitude === 'number') {
+        const syntheticPos: GeolocationPosition = {
+          coords: {
+            latitude: data.latitude,
+            longitude: data.longitude,
+            accuracy: 2500, // Coarse IP accuracy
+            altitude: null,
+            altitudeAccuracy: null,
+            heading: null,
+            speed: null,
+            toJSON: () => ({})
+          } as GeolocationCoordinates,
+          timestamp: Date.now(),
+          toJSON: () => ({})
+        } as GeolocationPosition;
+        return syntheticPos;
       }
-    );
-  });
+    }
+  } catch (ipErr) {
+    console.warn('IP geolocation fallback failed:', ipErr);
+  }
+
+  throw new Error('GPS coordinates unavailable. Check browser site permissions or enable phone location.');
 }
 
 /**
@@ -60,12 +115,80 @@ export function getCurrentPosition(highAccuracy = true): Promise<GeolocationPosi
  */
 const geocodeCache = new Map<string, string>();
 
+export function isPlaceholderAddress(address?: string): boolean {
+  if (!address || !address.trim()) return true;
+  const lower = address.toLowerCase();
+  return (
+    lower.includes('locating') ||
+    lower.includes('getting gps') ||
+    lower.includes('acquiring') ||
+    lower.includes('resolving') ||
+    lower.includes('pending') ||
+    lower === 'current location' ||
+    lower === 'start location'
+  );
+}
+
 export async function reverseGeocode(lat: number, lon: number): Promise<string> {
+  if ((!lat && !lon) || (lat === 0 && lon === 0)) return '';
   const cacheKey = `${lat.toFixed(4)},${lon.toFixed(4)}`;
   if (geocodeCache.has(cacheKey)) {
     return geocodeCache.get(cacheKey)!;
   }
 
+  // Strategy 1: Server-side proxy (fastest, unblocked, avoids client CORS/User-Agent policy)
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch(`/api/reverse-geocode?lat=${lat}&lon=${lon}`, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.address && !data.address.includes('°')) {
+        geocodeCache.set(cacheKey, data.address);
+        return data.address;
+      }
+      if (data.address) {
+        geocodeCache.set(cacheKey, data.address);
+        return data.address;
+      }
+    }
+  } catch (err) {
+    // Continue to direct fallbacks
+  }
+
+  // Strategy 2: Direct BigDataCloud free client reverse geocoding API
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3500);
+    const bdcRes = await fetch(
+      `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timeoutId);
+    if (bdcRes.ok) {
+      const bdc = await bdcRes.json();
+      const locality = bdc.locality || bdc.city || '';
+      const principalSubdiv = bdc.principalSubdivision || '';
+      const street = bdc.localityInfo?.administrative?.[bdc.localityInfo.administrative.length - 1]?.name || '';
+
+      let formatted = '';
+      if (street && locality && street !== locality) {
+        formatted = `${street}, ${locality}`;
+      } else if (locality) {
+        formatted = principalSubdiv ? `${locality}, ${principalSubdiv}` : locality;
+      }
+
+      if (formatted) {
+        geocodeCache.set(cacheKey, formatted);
+        return formatted;
+      }
+    }
+  } catch (bdcErr) {
+    // Continue to nominatim
+  }
+
+  // Strategy 3: Direct Nominatim
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 4000);
@@ -75,8 +198,7 @@ export async function reverseGeocode(lat: number, lon: number): Promise<string> 
       {
         signal: controller.signal,
         headers: {
-          'Accept': 'application/json',
-          'User-Agent': 'EasyLogApp/1.8 (trip-tracker)'
+          'Accept': 'application/json'
         }
       }
     );
@@ -100,7 +222,6 @@ export async function reverseGeocode(lat: number, lon: number): Promise<string> 
       }
 
       if (!label && data.display_name) {
-        // take first 2 parts of display name
         label = data.display_name.split(',').slice(0, 2).join(',').trim();
       }
 
@@ -110,7 +231,7 @@ export async function reverseGeocode(lat: number, lon: number): Promise<string> 
       }
     }
   } catch (e) {
-    // Offline or network error - fallback to formatted coordinates
+    // Offline or network error
   }
 
   const fallback = `${lat.toFixed(4)}°, ${lon.toFixed(4)}°`;

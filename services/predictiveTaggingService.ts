@@ -1,4 +1,5 @@
-import { Trip } from '../types';
+import { Trip, LocationPoint } from '../types';
+import { evaluateTripPurpose } from './locationConfigService';
 
 export interface TripPrediction {
   predictedTripType: 'work' | 'personal';
@@ -50,6 +51,8 @@ export async function predictTripTag(
   tripData: {
     startAddress?: string;
     endAddress?: string;
+    startLocation?: LocationPoint;
+    endLocation?: LocationPoint;
     distance?: number;
     startTime?: string;
     vehicle?: string;
@@ -59,7 +62,27 @@ export async function predictTripTag(
 ): Promise<TripPrediction> {
   const { startAddress = '', endAddress = '', distance = 0, startTime = new Date().toISOString(), vehicle = '', notes = '' } = tripData;
 
-  // 1. Check local place rules first for instant high-confidence match
+  // 1. Check Configured Home & Work Location Rules (Highest Priority ATO Rule)
+  const startLoc: LocationPoint | undefined = tripData.startLocation || (startAddress ? { latitude: 0, longitude: 0, address: startAddress } : undefined);
+  const endLoc: LocationPoint | undefined = tripData.endLocation || (endAddress ? { latitude: 0, longitude: 0, address: endAddress } : undefined);
+
+  const hwEval = evaluateTripPurpose(startLoc, endLoc);
+  if (hwEval.recommendedType) {
+    return {
+      predictedTripType: hwEval.recommendedType,
+      confidence: hwEval.isHomeTrip ? 99 : 95,
+      predictedClient: '',
+      predictedCategory: hwEval.recommendedType === 'personal' ? 'Personal / Commute' : 'General Business',
+      predictedReason: hwEval.reason || (hwEval.recommendedType === 'personal' ? 'Commute (Home travel)' : 'Work travel'),
+      tags: [
+        hwEval.recommendedType === 'personal' ? 'Personal' : 'Work',
+        hwEval.isCommute ? 'ATO Commute' : (hwEval.isHomeTrip ? 'Home' : 'Office')
+      ],
+      explanation: hwEval.ruleExplanation || 'Classified based on configured Home/Work location rules.'
+    };
+  }
+
+  // 2. Check local custom place rules
   const rules = getSavedPlaceRules();
   const fullText = `${startAddress} ${endAddress} ${notes}`.toLowerCase();
   for (const rule of rules) {

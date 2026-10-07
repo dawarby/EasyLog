@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Trip } from '../types';
-import { X, Save, Trash2, Hash, Briefcase, FileText, AlertCircle, Lock, User, Car, Image as ImageIcon, Upload, Sparkles, Check } from 'lucide-react';
+import { X, Save, Trash2, Hash, Briefcase, FileText, AlertCircle, Lock, User, Car, Image as ImageIcon, Upload, Sparkles, Check, MapPin } from 'lucide-react';
 import { predictTripTag, TripPrediction } from '../services/predictiveTaggingService';
 
 interface TripEditorProps {
@@ -74,6 +74,8 @@ export const TripEditor: React.FC<TripEditorProps> = ({
   const [notes, setNotes] = useState('');
   const [tripType, setTripType] = useState<'work' | 'personal'>('work');
   const [registrationNumber, setRegistrationNumber] = useState('');
+  const [startAddress, setStartAddress] = useState('');
+  const [endAddress, setEndAddress] = useState('');
   const [isCommitted, setIsCommitted] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -106,6 +108,8 @@ export const TripEditor: React.FC<TripEditorProps> = ({
         setNotes(initialTrip.notes || '');
         setTripType(initialTrip.tripType || 'work');
         setRegistrationNumber(initialTrip.registrationNumber || '');
+        setStartAddress(initialTrip.startLocation?.address || initialTrip.start?.location?.address || '');
+        setEndAddress(initialTrip.endLocation?.address || initialTrip.end?.location?.address || '');
         setIsCommitted(initialTrip.verificationStatus !== 'pending');
       } else {
         // New trip defaults
@@ -121,6 +125,8 @@ export const TripEditor: React.FC<TripEditorProps> = ({
         setNotes('');
         setTripType('work');
         setRegistrationNumber(vehicles.length === 1 ? vehicles[0] : '');
+        setStartAddress('');
+        setEndAddress('');
         setIsCommitted(true);
       }
       setError(null);
@@ -213,6 +219,22 @@ export const TripEditor: React.FC<TripEditorProps> = ({
     const startTimestamp = startDate ? new Date(startDate).toISOString() : new Date().toISOString();
     const endTimestamp = endDate ? new Date(endDate).toISOString() : undefined;
     
+    const resolvedStartLocation = startAddress.trim()
+      ? {
+          ...(initialTrip?.startLocation || initialTrip?.start?.location || { latitude: 0, longitude: 0 }),
+          address: startAddress.trim(),
+          timestamp: startTimestamp
+        }
+      : initialTrip?.startLocation;
+
+    const resolvedEndLocation = endAddress.trim()
+      ? {
+          ...(initialTrip?.endLocation || initialTrip?.end?.location || { latitude: 0, longitude: 0 }),
+          address: endAddress.trim(),
+          timestamp: endTimestamp || new Date().toISOString()
+        }
+      : initialTrip?.endLocation;
+
     const tripData: Trip = {
       id: initialTrip?.id || crypto.randomUUID(),
       status: endVal ? 'completed' : 'active',
@@ -221,13 +243,13 @@ export const TripEditor: React.FC<TripEditorProps> = ({
         value: startVal,
         timestamp: startTimestamp,
         imageUrl: startImage,
-        location: initialTrip?.start?.location
+        location: resolvedStartLocation || initialTrip?.start?.location
       },
       end: endVal ? {
         value: endVal,
         timestamp: endTimestamp || new Date().toISOString(),
         imageUrl: endImage,
-        location: initialTrip?.end?.location
+        location: resolvedEndLocation || initialTrip?.end?.location
       } : undefined,
       distance: endVal ? (endVal - startVal) : undefined,
       clientName: clientName,
@@ -235,8 +257,8 @@ export const TripEditor: React.FC<TripEditorProps> = ({
       tripType: tripType,
       registrationNumber: registrationNumber,
       trackingMode: initialTrip?.trackingMode,
-      startLocation: initialTrip?.startLocation,
-      endLocation: initialTrip?.endLocation,
+      startLocation: resolvedStartLocation,
+      endLocation: resolvedEndLocation,
       routeCoordinates: initialTrip?.routeCoordinates,
       triggerSource: initialTrip?.triggerSource
     };

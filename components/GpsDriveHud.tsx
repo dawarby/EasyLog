@@ -152,30 +152,44 @@ export const GpsDriveHud: React.FC<GpsDriveHudProps> = ({
         </span>
       </div>
 
-      {/* Current Location Road / Destination with Map View button */}
-      <div className="bg-white/5 rounded-xl p-3 border border-white/5 flex items-center justify-between">
+      {/* Route Addresses: Started At & Current Location */}
+      <div className="bg-white/5 rounded-xl p-3 border border-white/5 space-y-2">
         <div className="flex items-start text-xs text-gray-300 overflow-hidden pr-2">
-          <MapPin size={14} className="mr-2 text-indigo-400 shrink-0 mt-0.5" />
-          <div className="overflow-hidden">
-            <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold block">
-              Current Location
+          <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 mt-1 mr-2.5 shrink-0" />
+          <div className="overflow-hidden flex-1">
+            <span className="text-[10px] uppercase tracking-wider text-emerald-400 font-semibold block">
+              Start Location
             </span>
             <p className="truncate font-medium text-white">
-              {currentLocation?.address || 'Tracking GPS route...'}
+              {trip.startLocation?.address || trip.start?.location?.address || 'Detecting start address...'}
             </p>
           </div>
         </div>
 
-        {onOpenMap && (
-          <button
-            type="button"
-            onClick={onOpenMap}
-            className="px-2.5 py-1.5 bg-indigo-600/50 hover:bg-indigo-600 border border-indigo-500/40 text-indigo-200 hover:text-white rounded-xl text-xs font-semibold flex items-center space-x-1 shrink-0 transition"
-          >
-            <Navigation size={12} />
-            <span>Map</span>
-          </button>
-        )}
+        <div className="border-t border-white/10 pt-2 flex items-center justify-between">
+          <div className="flex items-start text-xs text-gray-300 overflow-hidden pr-2">
+            <MapPin size={13} className="mr-2 text-indigo-400 shrink-0 mt-0.5" />
+            <div className="overflow-hidden">
+              <span className="text-[10px] uppercase tracking-wider text-indigo-300 font-semibold block">
+                Current Location
+              </span>
+              <p className="truncate font-medium text-white">
+                {currentLocation?.address || (currentLocation?.latitude ? `${currentLocation.latitude.toFixed(5)}°, ${currentLocation.longitude.toFixed(5)}°` : 'Acquiring GPS fix...')}
+              </p>
+            </div>
+          </div>
+
+          {onOpenMap && (
+            <button
+              type="button"
+              onClick={onOpenMap}
+              className="px-2.5 py-1.5 bg-indigo-600/50 hover:bg-indigo-600 border border-indigo-500/40 text-indigo-200 hover:text-white rounded-xl text-xs font-semibold flex items-center space-x-1 shrink-0 transition"
+            >
+              <Navigation size={12} />
+              <span>Map</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Stationary Reminder Notice */}

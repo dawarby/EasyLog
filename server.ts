@@ -40,6 +40,173 @@ async function startServer() {
     });
   });
 
+  // Server-side robust Reverse Geocoding API (eliminates client CORS, User-Agent restrictions, and rate limits)
+  const serverGeocodeCache = new Map<string, string>();
+
+  app.get("/api/reverse-geocode", async (req, res) => {
+    const lat = parseFloat(req.query.lat as string);
+    const lon = parseFloat(req.query.lon as string);
+
+    if (isNaN(lat) || isNaN(lon) || (lat === 0 && lon === 0)) {
+      return res.status(400).json({ error: "Missing or invalid lat/lon parameters" });
+    }
+
+    const cacheKey = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+    if (serverGeocodeCache.has(cacheKey)) {
+      return res.json({ address: serverGeocodeCache.get(cacheKey) });
+    }
+
+    // Provider 1: OpenStreetMap Nominatim
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=17&addressdetails=1`,
+        {
+          signal: controller.signal,
+          headers: {
+            "User-Agent": "EasyLog-FleetTracker/1.0 (contact: support@easylog.app)",
+            "Accept": "application/json",
+            "Accept-Language": "en"
+          }
+        }
+      );
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const data = await response.json();
+        const addr = data.address;
+        let formatted = '';
+
+        if (addr) {
+          const houseNumber = addr.house_number || '';
+          const road = addr.road || addr.street || addr.pedestrian || addr.suburb || addr.neighbourhood || '';
+          const streetPart = houseNumber && road ? `${houseNumber} ${road}` : road;
+          const suburbOrCity = addr.suburb || addr.city || addr.town || addr.village || addr.municipality || '';
+          const state = addr.state ? addr.state.substring(0, 3).toUpperCase() : '';
+
+          if (streetPart && suburbOrCity) {
+            formatted = `${streetPart}, ${suburbOrCity}`;
+          } else if (streetPart) {
+            formatted = streetPart;
+          } else if (suburbOrCity) {
+            formatted = state ? `${suburbOrCity}, ${state}` : suburbOrCity;
+          }
+        }
+
+        if (!formatted && data.display_name) {
+          formatted = data.display_name.split(',').slice(0, 2).join(',').trim();
+        }
+
+        if (formatted) {
+          serverGeocodeCache.set(cacheKey, formatted);
+          return res.json({ address: formatted, provider: 'nominatim' });
+        }
+      }
+    } catch (nomErr) {
+      console.warn("Nominatim reverse geocode error:", nomErr);
+    }
+
+    // Provider 2: BigDataCloud free client-side reverse geocoding API fallback
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+      const bdcResponse = await fetch(
+        `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`,
+        { signal: controller.signal }
+      );
+      clearTimeout(timeoutId);
+
+      if (bdcResponse.ok) {
+        const bdc = await bdcResponse.json();
+        const locality = bdc.locality || bdc.city || '';
+        const principalSubdiv = bdc.principalSubdivision || '';
+        const street = bdc.localityInfo?.administrative?.[bdc.localityInfo.administrative.length - 1]?.name || '';
+
+        let formatted = '';
+        if (street && locality && street !== locality) {
+          formatted = `${street}, ${locality}`;
+        } else if (locality) {
+          formatted = principalSubdiv ? `${locality}, ${principalSubdiv}` : locality;
+        } else if (bdc.countryName) {
+          formatted = `${lat.toFixed(4)}°, ${lon.toFixed(4)}° (${bdc.countryName})`;
+        }
+
+        if (formatted) {
+          serverGeocodeCache.set(cacheKey, formatted);
+          return res.json({ address: formatted, provider: 'bigdatacloud' });
+        }
+      }
+    } catch (bdcErr) {
+      console.warn("BigDataCloud fallback error:", bdcErr);
+    }
+
+    // Final fallback
+    const fallbackCoord = `${lat.toFixed(4)}°, ${lon.toFixed(4)}°`;
+    serverGeocodeCache.set(cacheKey, fallbackCoord);
+    return res.json({ address: fallbackCoord, provider: 'coordinates' });
+  });
+
+  // Forward Geocoding API (Search address to get coordinates)
+  app.get("/api/geocode", async (req, res) => {
+    const q = (req.query.q as string || '').trim();
+    if (!q) {
+      return res.status(400).json({ error: "Missing search query parameter 'q'" });
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4500);
+
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(q)}&limit=5&addressdetails=1`,
+        {
+          signal: controller.signal,
+          headers: {
+            "User-Agent": "EasyLog-FleetTracker/1.0 (contact: support@easylog.app)",
+            "Accept": "application/json",
+            "Accept-Language": "en"
+          }
+        }
+      );
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const data = await response.json();
+        const results = (Array.isArray(data) ? data : []).map((item: any) => {
+          const addr = item.address || {};
+          const houseNumber = addr.house_number || '';
+          const road = addr.road || addr.street || addr.pedestrian || addr.suburb || '';
+          const streetPart = houseNumber && road ? `${houseNumber} ${road}` : road;
+          const suburbOrCity = addr.suburb || addr.city || addr.town || addr.village || '';
+          const state = addr.state ? addr.state.substring(0, 3).toUpperCase() : '';
+          
+          let formatted = '';
+          if (streetPart && suburbOrCity) {
+            formatted = `${streetPart}, ${suburbOrCity}${state ? ', ' + state : ''}`;
+          } else {
+            formatted = item.display_name.split(',').slice(0, 3).join(',').trim();
+          }
+
+          return {
+            displayName: formatted,
+            fullAddress: item.display_name,
+            lat: parseFloat(item.lat),
+            lon: parseFloat(item.lon)
+          };
+        });
+
+        return res.json({ results });
+      }
+    } catch (err) {
+      console.warn("Forward geocoding error:", err);
+    }
+
+    return res.json({ results: [] });
+  });
+
   // Odometer Image Analysis API
   app.post("/api/analyze-odometer", async (req, res) => {
     try {

@@ -13,9 +13,14 @@ import { GpsEndModal } from './components/GpsEndModal';
 import { BluetoothSetupModal } from './components/BluetoothSetupModal';
 import { TripMapModal } from './components/TripMapModal';
 import { TripVerificationModal } from './components/TripVerificationModal';
-import { calculateDistance, reverseGeocode, requestScreenWakeLock, releaseScreenWakeLock, playTripStartTone, playTripEndTone, triggerHaptic, getCurrentPosition } from './services/gpsService';
+import { OdometerCalibrationModal } from './components/OdometerCalibrationModal';
+import { CalibrationReminderBanner } from './components/CalibrationReminderBanner';
+import { calculateDistance, reverseGeocode, isPlaceholderAddress, requestScreenWakeLock, releaseScreenWakeLock, playTripStartTone, playTripEndTone, triggerHaptic, getCurrentPosition } from './services/gpsService';
 import { getStoredBluetoothConfig, saveBluetoothConfig, STORAGE_KEY_PASSENGER_MODE, DEFAULT_BT_CONFIG, syncWithNativeAndroidBridge } from './services/bluetoothService';
-import { CarFront, Play, Square, Briefcase, Settings as SettingsIcon, X, CheckCircle2, User, ExternalLink, AlertCircle, AlertTriangle, Zap, ArrowRight, CornerDownRight, HardDrive, Navigation, Camera, Bluetooth, Shield, UserX, Radio, Map, BookOpen, Info, FileCheck, Clock } from 'lucide-react';
+import { getVehicleCalibrationStatus, getOverdueVehicles } from './services/odometerCalibrationService';
+import { sendCalibrationReminderNotification } from './services/pushNotificationService';
+import { getStoredHomeWorkConfig, evaluateTripPurpose, isLocationMatch } from './services/locationConfigService';
+import { CarFront, Play, Square, Briefcase, Settings as SettingsIcon, X, CheckCircle2, User, ExternalLink, AlertCircle, AlertTriangle, Zap, ArrowRight, CornerDownRight, HardDrive, Navigation, Camera, Bluetooth, Shield, UserX, Radio, Map, BookOpen, Info, FileCheck, Clock, Gauge } from 'lucide-react';
 import { saveSnapshotToFolder, checkDirectoryConnection, listExternalBackups, loadBackupFile, connectDirectory, getConnectedFolderName, disconnectDirectory } from './services/storageService';
 
 // Key for Local Storage - EasyLog
@@ -151,6 +156,11 @@ export default function App() {
     return history.filter(t => t.verificationStatus === 'pending');
   }, [history]);
 
+  // Overdue Monthly Odometer Calibration Vehicles
+  const overdueVehicles = useMemo(() => {
+    return getOverdueVehicles(vehicles, history, 30);
+  }, [vehicles, history]);
+
   const handleCommitTrip = (tripToCommit: Trip) => {
     const committed: Trip = {
       ...tripToCommit,
@@ -212,6 +222,16 @@ export default function App() {
 
   // Abort Confirmation State
   const [showAbortConfirm, setShowAbortConfirm] = useState(false);
+
+  // ATO Calibration State
+  const [isCalibrationOpen, setIsCalibrationOpen] = useState(false);
+  const [calibrationTargetVehicle, setCalibrationTargetVehicle] = useState<string>('');
+  const [isCalibrationBannerDismissed, setIsCalibrationBannerDismissed] = useState(false);
+
+  const openCalibration = (vehicleReg?: string) => {
+    setCalibrationTargetVehicle(vehicleReg || vehicles[0] || '');
+    setIsCalibrationOpen(true);
+  };
 
   // Notification State
   const [notification, setNotification] = useState<{message: string, type: 'success' | 'error'} | null>(null);
@@ -369,6 +389,19 @@ export default function App() {
       }
     }
 
+    // 1b. Listen for custom events from notifications and deep links
+    const handleOpenVerification = () => {
+      setIsVerificationModalOpen(true);
+    };
+
+    const handleOpenCalibrationEvent = (event: any) => {
+      const v = event?.detail?.vehicleReg || vehicles[0] || '';
+      openCalibration(v);
+    };
+
+    window.addEventListener('open-verification-queue', handleOpenVerification);
+    window.addEventListener('open-calibration-dialog', handleOpenCalibrationEvent);
+
     // 2. Native Android Play Store Bridge (Zero-Tasker Direct Bluetooth Broadcast)
     const handleNativeConnect = (event: any) => {
       const vehicle = event?.detail?.vehicle || bluetoothConfig.vehicleReg;
@@ -401,6 +434,8 @@ export default function App() {
     syncWithNativeAndroidBridge(bluetoothConfig, passengerMode);
 
     return () => {
+      window.removeEventListener('open-verification-queue', handleOpenVerification);
+      window.removeEventListener('open-calibration-dialog', handleOpenCalibrationEvent);
       window.removeEventListener('android_bluetooth_connected', handleNativeConnect);
       window.removeEventListener('android_bluetooth_disconnected', handleNativeDisconnect);
     };
@@ -463,6 +498,68 @@ export default function App() {
     localStorage.setItem(STORAGE_KEY_HIGH_ACCURACY, highAccuracy.toString());
   }, [highAccuracy]);
 
+  // Self-healing migration: backfill any missing or placeholder start/end addresses in historical trips
+  useEffect(() => {
+    let isCancelled = false;
+    const repairHistoryAddresses = async () => {
+      let hasUpdates = false;
+      const updatedHistory = await Promise.all(
+        history.map(async (trip) => {
+          let updatedTrip = { ...trip };
+          let changed = false;
+
+          // Check start location address
+          const startLoc = updatedTrip.startLocation || updatedTrip.start?.location;
+          if (startLoc && startLoc.latitude && startLoc.longitude && startLoc.latitude !== 0 && isPlaceholderAddress(startLoc.address)) {
+            try {
+              const addr = await reverseGeocode(startLoc.latitude, startLoc.longitude);
+              if (addr && !isPlaceholderAddress(addr)) {
+                updatedTrip = {
+                  ...updatedTrip,
+                  startLocation: { ...startLoc, address: addr },
+                  start: { ...updatedTrip.start, location: { ...(updatedTrip.start?.location || startLoc), address: addr } }
+                };
+                changed = true;
+              }
+            } catch (e) {}
+          }
+
+          // Check end location address
+          const endLoc = updatedTrip.endLocation || updatedTrip.end?.location;
+          if (endLoc && endLoc.latitude && endLoc.longitude && endLoc.latitude !== 0 && isPlaceholderAddress(endLoc.address)) {
+            try {
+              const addr = await reverseGeocode(endLoc.latitude, endLoc.longitude);
+              if (addr && !isPlaceholderAddress(addr)) {
+                updatedTrip = {
+                  ...updatedTrip,
+                  endLocation: { ...endLoc, address: addr },
+                  end: updatedTrip.end ? { ...updatedTrip.end, location: { ...(updatedTrip.end.location || endLoc), address: addr } } : undefined
+                };
+                changed = true;
+              }
+            } catch (e) {}
+          }
+
+          if (changed) hasUpdates = true;
+          return updatedTrip;
+        })
+      );
+
+      if (!isCancelled && hasUpdates) {
+        setHistory(updatedHistory);
+      }
+    };
+
+    const timer = setTimeout(() => {
+      repairHistoryAddresses();
+    }, 1500);
+
+    return () => {
+      isCancelled = true;
+      clearTimeout(timer);
+    };
+  }, []);
+
   // Real-time GPS Tracking Watcher Effect
   useEffect(() => {
     if (!activeTrip || activeTrip.trackingMode !== 'gps') {
@@ -498,8 +595,85 @@ export default function App() {
           const speedInUnit = distanceUnit === 'mi' ? (rawSpeedKmh * 0.621371) : rawSpeedKmh;
           setCurrentGpsSpeed(speedInUnit);
 
-          // Filter out low accuracy fixes (> 40m)
-          if (accuracy > 40) return;
+          // Update current position display immediately so coordinates are never missing
+          setCurrentGpsLocation((prev) => ({
+            latitude,
+            longitude,
+            accuracy,
+            timestamp: new Date().toISOString(),
+            address: prev?.address || 'Tracking GPS route...'
+          }));
+
+          // Filter out extreme inaccurate fixes (> 100m) for distance calculations
+          if (accuracy > 100) return;
+
+          // If active trip's start location was missing coordinates (0,0) or still has placeholder address,
+          // backfill it immediately with this accurate fix!
+          if (!lastLat || lastLat === 0) {
+            lastLat = latitude;
+            lastLon = longitude;
+            setActiveTrip((curr) => {
+              if (!curr) return null;
+              const curStartAddr = curr.startLocation?.address || curr.start?.location?.address;
+              const needsAddress = isPlaceholderAddress(curStartAddr);
+              const locPoint: LocationPoint = {
+                latitude,
+                longitude,
+                accuracy,
+                timestamp: curr.startLocation?.timestamp || new Date().toISOString(),
+                address: !needsAddress && curStartAddr ? curStartAddr : 'Resolving start address...'
+              };
+
+              if (needsAddress) {
+                reverseGeocode(latitude, longitude).then((addr) => {
+                  if (addr && !isPlaceholderAddress(addr)) {
+                    setActiveTrip((c) => {
+                      if (!c) return null;
+                      return {
+                        ...c,
+                        startLocation: { ...(c.startLocation || locPoint), address: addr },
+                        start: { ...c.start, location: { ...(c.start?.location || locPoint), address: addr } }
+                      };
+                    });
+                  }
+                });
+              }
+
+              return {
+                ...curr,
+                startLocation: locPoint,
+                start: {
+                  ...curr.start,
+                  location: locPoint
+                }
+              };
+            });
+          } else {
+            // Check if start location has valid coordinates but address is still a placeholder
+            setActiveTrip((curr) => {
+              if (!curr) return null;
+              const curStartAddr = curr.startLocation?.address || curr.start?.location?.address;
+              if (isPlaceholderAddress(curStartAddr)) {
+                const sLat = curr.startLocation?.latitude || curr.start?.location?.latitude || latitude;
+                const sLon = curr.startLocation?.longitude || curr.start?.location?.longitude || longitude;
+                if (sLat !== 0 && sLon !== 0) {
+                  reverseGeocode(sLat, sLon).then((addr) => {
+                    if (addr && !isPlaceholderAddress(addr)) {
+                      setActiveTrip((c) => {
+                        if (!c) return null;
+                        return {
+                          ...c,
+                          startLocation: { ...(c.startLocation || { latitude: sLat, longitude: sLon }), address: addr },
+                          start: { ...c.start, location: { ...(c.start?.location || { latitude: sLat, longitude: sLon }), address: addr } }
+                        };
+                      });
+                    }
+                  });
+                }
+              }
+              return curr;
+            });
+          }
 
           if (lastLat !== null && lastLon !== null) {
             const delta = calculateDistance(lastLat, lastLon, latitude, longitude, distanceUnit);
@@ -526,14 +700,6 @@ export default function App() {
             lastLat = latitude;
             lastLon = longitude;
           }
-
-          setCurrentGpsLocation((prev) => ({
-            latitude,
-            longitude,
-            accuracy,
-            timestamp: new Date().toISOString(),
-            address: prev?.address || 'Driving...'
-          }));
         },
         (err) => {
           console.warn('GPS location tracking error:', err);
@@ -616,6 +782,23 @@ export default function App() {
     setCurrentGpsLocation(data.startLocation);
     setActiveTrip(newTrip);
     setShowGpsStart(false);
+
+    // If startLocation address is still resolving/placeholder, resolve it in background
+    if (isPlaceholderAddress(data.startLocation?.address) && data.startLocation?.latitude && data.startLocation?.longitude && data.startLocation.latitude !== 0) {
+      reverseGeocode(data.startLocation.latitude, data.startLocation.longitude).then(addr => {
+        if (addr && !isPlaceholderAddress(addr)) {
+          setActiveTrip(prev => {
+            if (!prev) return null;
+            return {
+              ...prev,
+              startLocation: { ...prev.startLocation!, address: addr },
+              start: { ...prev.start, location: prev.start.location ? { ...prev.start.location, address: addr } : undefined }
+            };
+          });
+        }
+      });
+    }
+
     showNotification("GPS tracking active! Drive safely.", "success");
   };
 
@@ -623,11 +806,42 @@ export default function App() {
     playTripEndTone();
     triggerHaptic('stop');
 
-    if (currentGpsLocation) {
+    // Ensure start location address is resolved before showing review dialog
+    if (activeTrip?.startLocation && activeTrip.startLocation.latitude && activeTrip.startLocation.longitude && activeTrip.startLocation.latitude !== 0) {
+      const sAddr = activeTrip.startLocation.address;
+      if (isPlaceholderAddress(sAddr)) {
+        try {
+          const resolved = await reverseGeocode(activeTrip.startLocation.latitude, activeTrip.startLocation.longitude);
+          if (resolved && !isPlaceholderAddress(resolved)) {
+            setActiveTrip(prev => prev ? {
+              ...prev,
+              startLocation: { ...prev.startLocation!, address: resolved },
+              start: { ...prev.start, location: prev.start.location ? { ...prev.start.location, address: resolved } : undefined }
+            } : null);
+          }
+        } catch (e) {}
+      }
+    }
+
+    if (currentGpsLocation && currentGpsLocation.latitude !== 0) {
       try {
         const addr = await reverseGeocode(currentGpsLocation.latitude, currentGpsLocation.longitude);
-        setCurrentGpsLocation(prev => prev ? { ...prev, address: addr } : null);
+        if (addr && !isPlaceholderAddress(addr)) {
+          setCurrentGpsLocation(prev => prev ? { ...prev, address: addr } : null);
+        }
       } catch (e) {}
+    }
+
+    // Evaluate Home / Work purpose and pre-classify trip type
+    const hwConfig = getStoredHomeWorkConfig();
+    const endPoint = currentGpsLocation && currentGpsLocation.latitude !== 0 ? { ...currentGpsLocation } : undefined;
+    const hwEval = evaluateTripPurpose(activeTrip?.startLocation, endPoint, hwConfig);
+    if (hwEval.recommendedType) {
+      setActiveTrip(prev => prev ? {
+        ...prev,
+        tripType: hwEval.recommendedType || prev.tripType,
+        notes: prev.notes || (hwEval.reason || undefined)
+      } : null);
     }
 
     setShowGpsEnd(true);
@@ -675,27 +889,92 @@ export default function App() {
     updateVehiclesList(targetVehicle);
 
     const startOdo = getLastKnownOdoForVehicle(targetVehicle) || 0;
-    const targetTripType = bluetoothConfig.defaultTripType || 'work';
+    let targetTripType = bluetoothConfig.defaultTripType || 'work';
 
     let startLoc: LocationPoint = {
       latitude: 0,
       longitude: 0,
       timestamp: new Date().toISOString(),
-      address: 'Getting GPS location...'
+      address: 'Acquiring GPS location...'
     };
 
     try {
       const pos = await getCurrentPosition(highAccuracy);
+      const lat = pos.coords.latitude;
+      const lon = pos.coords.longitude;
+      const acc = pos.coords.accuracy;
+
       startLoc = {
-        latitude: pos.coords.latitude,
-        longitude: pos.coords.longitude,
-        accuracy: pos.coords.accuracy,
+        latitude: lat,
+        longitude: lon,
+        accuracy: acc,
         timestamp: new Date().toISOString(),
-        address: 'Locating address...'
+        address: `${lat.toFixed(4)}°, ${lon.toFixed(4)}°`
       };
-      reverseGeocode(pos.coords.latitude, pos.coords.longitude).then(addr => {
-        setCurrentGpsLocation(prev => prev ? { ...prev, address: addr } : null);
+
+      // Fast reverse geocode attempt (up to 1.8s) so trip starts with human-readable address immediately
+      try {
+        const quickAddr = await Promise.race([
+          reverseGeocode(lat, lon),
+          new Promise<string>((_, reject) => setTimeout(() => reject(new Error('timeout')), 1800))
+        ]);
+        if (quickAddr && !isPlaceholderAddress(quickAddr)) {
+          startLoc.address = quickAddr;
+        }
+      } catch (e) {
+        // Will be updated via background resolution
+      }
+
+      // Check if starting at Home: auto-detect as 'personal' under ATO commute rules
+      const hwConfig = getStoredHomeWorkConfig();
+      if (hwConfig.autoDetectHomeAsPersonal && isLocationMatch(startLoc, hwConfig.home)) {
+        targetTripType = 'personal';
+      }
+
+      // Background resolution ensures activeTrip is updated whenever reverse geocoding finishes
+      reverseGeocode(lat, lon).then(addr => {
+        if (addr && !isPlaceholderAddress(addr)) {
+          const freshConfig = getStoredHomeWorkConfig();
+          const freshResolvedLoc: LocationPoint = {
+            latitude: lat,
+            longitude: lon,
+            accuracy: acc,
+            timestamp: new Date().toISOString(),
+            address: addr
+          };
+          const freshEval = evaluateTripPurpose(freshResolvedLoc, null, freshConfig);
+
+          setCurrentGpsLocation(prev => prev ? { ...prev, address: addr } : freshResolvedLoc);
+          setActiveTrip(prev => {
+            if (!prev) return null;
+            const updatedType = (freshEval.isHomeTrip && freshConfig.autoDetectHomeAsPersonal)
+              ? 'personal'
+              : prev.tripType;
+            return {
+              ...prev,
+              tripType: updatedType,
+              startLocation: {
+                ...(prev.startLocation || startLoc),
+                latitude: lat,
+                longitude: lon,
+                address: addr
+              },
+              start: {
+                ...prev.start,
+                location: {
+                  ...(prev.start?.location || startLoc),
+                  latitude: lat,
+                  longitude: lon,
+                  address: addr
+                }
+              }
+            };
+          });
+        }
+      }).catch(err => {
+        console.warn("Background reverse geocode failed on auto-start:", err);
       });
+
     } catch (err) {
       console.warn("Could not get initial GPS location for Bluetooth trip", err);
     }
@@ -723,7 +1002,13 @@ export default function App() {
     setActiveTrip(newTrip);
     playTripStartTone();
     triggerHaptic('start');
-    showNotification(`🚗 Connected to Car! Auto-tracking started for ${targetVehicle}`, "success");
+
+    const hwConfigOnStart = getStoredHomeWorkConfig();
+    const isHomeStart = hwConfigOnStart.autoDetectHomeAsPersonal && isLocationMatch(startLoc, hwConfigOnStart.home);
+    const startMsg = isHomeStart
+      ? `🚗 Connected to Car! Auto-tracking started for ${targetVehicle} (Home: Personal Commute)`
+      : `🚗 Connected to Car! Auto-tracking started for ${targetVehicle}`;
+    showNotification(startMsg, "success");
   };
 
   const handleEndBluetoothTrip = async () => {
@@ -737,31 +1022,100 @@ export default function App() {
         const finalDist = Math.round(trackedGpsDistance * 10) / 10;
         const endOdo = activeTrip.start.value + Math.round(finalDist);
         let endAddr = currentGpsLocation?.address;
-        if (!endAddr && currentGpsLocation) {
+        if ((!endAddr || isPlaceholderAddress(endAddr)) && currentGpsLocation && currentGpsLocation.latitude !== 0) {
           try {
             endAddr = await reverseGeocode(currentGpsLocation.latitude, currentGpsLocation.longitude);
           } catch (e) {}
+        }
+
+        // CRITICAL: Ensure start location address is resolved before saving
+        let startLocToSave = activeTrip.startLocation || activeTrip.start.location;
+        let startAddr = startLocToSave?.address;
+        if ((!startAddr || isPlaceholderAddress(startAddr)) && startLocToSave && startLocToSave.latitude && startLocToSave.longitude && startLocToSave.latitude !== 0) {
+          try {
+            const resolvedStart = await reverseGeocode(startLocToSave.latitude, startLocToSave.longitude);
+            if (resolvedStart && !isPlaceholderAddress(resolvedStart)) {
+              startAddr = resolvedStart;
+            }
+          } catch (e) {
+            console.warn('Could not reverse geocode start location on auto trip end', e);
+          }
+        }
+
+        if (startLocToSave && startAddr) {
+          startLocToSave = { ...startLocToSave, address: startAddr };
+        }
+
+        const endPointToSave = currentGpsLocation ? { ...currentGpsLocation, address: endAddr } : undefined;
+
+        // Auto-detect trip purpose: ATO rule for Home trips = Personal
+        const hwConfig = getStoredHomeWorkConfig();
+        const hwEval = evaluateTripPurpose(startLocToSave, endPointToSave, hwConfig);
+        let finalTripType = activeTrip.tripType || 'work';
+        let finalNotes = activeTrip.notes;
+
+        if (hwEval.recommendedType) {
+          finalTripType = hwEval.recommendedType;
+          if (!finalNotes && hwEval.reason) {
+            finalNotes = hwEval.reason;
+          }
         }
 
         const completedTrip: Trip = {
           ...activeTrip,
           status: 'completed',
           distance: finalDist,
+          tripType: finalTripType,
+          notes: finalNotes,
+          start: {
+            ...activeTrip.start,
+            location: startLocToSave
+          },
+          startLocation: startLocToSave,
           end: {
             value: endOdo,
             timestamp: new Date().toISOString(),
-            location: currentGpsLocation ? { ...currentGpsLocation, address: endAddr } : undefined
+            location: endPointToSave
           },
-          endLocation: currentGpsLocation ? { ...currentGpsLocation, address: endAddr } : undefined
+          endLocation: endPointToSave
         };
 
         handleSaveGpsTrip(completedTrip);
         playTripEndTone();
         triggerHaptic('stop');
-        showNotification(`🚗 Car Disconnected — Trip saved (${finalDist} ${distanceUnit})`, 'success');
+
+        const disconnectMsg = (hwEval.isHomeTrip && hwConfig.autoDetectHomeAsPersonal)
+          ? `🚗 Car Disconnected — Saved as Personal (Home Commute, ${finalDist} ${distanceUnit})`
+          : `🚗 Car Disconnected — Trip saved (${finalDist} ${distanceUnit})`;
+        showNotification(disconnectMsg, 'success');
+
+        // Check if vehicle has reached monthly calibration threshold
+        const targetVehicle = completedTrip.registrationNumber || bluetoothConfig.vehicleReg || vehicles[0];
+        if (targetVehicle) {
+          const calibStatus = getVehicleCalibrationStatus(targetVehicle, history);
+          if (calibStatus.isOverdue) {
+            setTimeout(() => {
+              sendCalibrationReminderNotification(targetVehicle, calibStatus.daysSinceLastCalibration);
+              showNotification(
+                `⚠️ ${targetVehicle} is due for monthly odometer calibration (${calibStatus.daysSinceLastCalibration} days since last sync)`,
+                'error'
+              );
+            }, 1200);
+          }
+        }
       } else {
         handleGpsEndTrigger();
         showNotification("🚗 Car Disconnected — Review and save your trip", "success");
+
+        const targetVehicle = activeTrip.registrationNumber || bluetoothConfig.vehicleReg || vehicles[0];
+        if (targetVehicle) {
+          const calibStatus = getVehicleCalibrationStatus(targetVehicle, history);
+          if (calibStatus.isOverdue) {
+            setTimeout(() => {
+              sendCalibrationReminderNotification(targetVehicle, calibStatus.daysSinceLastCalibration);
+            }, 1200);
+          }
+        }
       }
     } else {
       handleEndTripClick();
@@ -1168,7 +1522,9 @@ export default function App() {
         const escapedReg = trip.registrationNumber ? `"${trip.registrationNumber}"` : '';
         const escapedStartLoc = trip.startLocation?.address ? `"${trip.startLocation.address.replace(/"/g, '""')}"` : '';
         const escapedEndLoc = trip.endLocation?.address ? `"${trip.endLocation.address.replace(/"/g, '""')}"` : '';
-        const modeLabel = trip.trackingMode === 'gps' ? 'GPS' : 'Camera';
+        const modeLabel = trip.isCalibration ? 'ATO Calibration' : (trip.trackingMode === 'gps' ? 'GPS' : 'Camera');
+        const calibPrefix = trip.isCalibration ? '[CALIBRATION SYNC] ' : '';
+        const finalEscapedNotes = `"${calibPrefix}${trip.notes ? trip.notes.replace(/"/g, '""') : ''}"`;
         
         return [
           `"${startDateObj.toLocaleDateString(locale)}"`,
@@ -1185,7 +1541,7 @@ export default function App() {
           escapedStartLoc,
           escapedEndLoc,
           `"${trip.status}"`,
-          escapedNotes
+          finalEscapedNotes
         ].join(',');
       })
     ].join('\n');
@@ -1367,6 +1723,26 @@ export default function App() {
           </div>
           <div className="flex items-center space-x-1.5">
             <PWAInstallButton variant="header" />
+            <button
+              onClick={() => openCalibration()}
+              className={`p-2 rounded-full transition relative ${
+                overdueVehicles.length > 0
+                  ? 'text-amber-700 bg-amber-100 hover:bg-amber-200 animate-pulse'
+                  : 'text-gray-500 hover:text-amber-700 hover:bg-amber-50'
+              }`}
+              title={
+                overdueVehicles.length > 0
+                  ? `ATO Monthly Calibration Due for ${overdueVehicles[0].vehicleReg}`
+                  : 'ATO Odometer Calibration & Cluster Alignment'
+              }
+            >
+              <Gauge size={20} />
+              {overdueVehicles.length > 0 && (
+                <span className="absolute -top-1 -right-1 bg-amber-600 text-white text-[9px] font-bold h-4 w-4 rounded-full flex items-center justify-center shadow-xs">
+                  !
+                </span>
+              )}
+            </button>
             {unverifiedTrips.length > 0 && (
               <button 
                   onClick={() => setIsVerificationModalOpen(true)}
@@ -1408,6 +1784,15 @@ export default function App() {
 
       <main className="max-w-md mx-auto px-4 py-6 space-y-6">
         
+        {/* Persistent Monthly Odometer Calibration Reminder Banner */}
+        {!isCalibrationBannerDismissed && overdueVehicles.length > 0 && (
+          <CalibrationReminderBanner
+            overdueVehicles={overdueVehicles}
+            onOpenCalibration={(v) => openCalibration(v)}
+            onDismiss={() => setIsCalibrationBannerDismissed(true)}
+          />
+        )}
+
         {/* Verification Required Banner Notification */}
         {unverifiedTrips.length > 0 && (
           <div 
@@ -1858,6 +2243,7 @@ export default function App() {
         isTripActive={!!activeTrip}
         onSimulateConnect={() => handleStartBluetoothTrip()}
         onSimulateDisconnect={() => handleEndBluetoothTrip()}
+        onOpenCalibration={(v) => openCalibration(v)}
         showNotification={showNotification}
       />
 
@@ -1909,6 +2295,24 @@ export default function App() {
             setIsVerificationModalOpen(false);
             handleEditTrip(trip);
           }}
+          showNotification={showNotification}
+        />
+      )}
+
+      {/* ATO Monthly Odometer Calibration Modal */}
+      {isCalibrationOpen && (
+        <OdometerCalibrationModal
+          isOpen={isCalibrationOpen}
+          onClose={() => setIsCalibrationOpen(false)}
+          vehicles={vehicles}
+          selectedVehicle={calibrationTargetVehicle}
+          history={history}
+          onSaveCalibrationTrip={(calibTrip) => {
+            handleSaveTrip(calibTrip);
+            setIsCalibrationBannerDismissed(false);
+          }}
+          lastKnownOdoForVehicle={getLastKnownOdoForVehicle}
+          distanceUnit={distanceUnit}
           showNotification={showNotification}
         />
       )}

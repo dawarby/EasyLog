@@ -42,10 +42,13 @@ import {
   BellOff,
   BellRing,
   Clock,
-  FileCheck
+  FileCheck,
+  Gauge,
+  Home
 } from 'lucide-react';
 import { Backup, BluetoothConfig } from '../types';
 import { PWAInstallButton } from './PWAInstallButton';
+import { HomeWorkLocationSettings } from './HomeWorkLocationSettings';
 import { isWebBluetoothSupported } from '../services/bluetoothService';
 import {
   getNotificationStatus,
@@ -57,7 +60,7 @@ import {
   NotificationPreferences,
 } from '../services/pushNotificationService';
 
-export type SettingsTab = 'setup' | 'automation' | 'notifications' | 'data' | 'guide' | 'about';
+export type SettingsTab = 'setup' | 'automation' | 'locations' | 'notifications' | 'data' | 'guide' | 'about';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -96,6 +99,7 @@ interface SettingsModalProps {
   isTripActive?: boolean;
   onSimulateConnect?: () => void;
   onSimulateDisconnect?: () => void;
+  onOpenCalibration?: (vehicleReg?: string) => void;
   showNotification?: (msg: string, type?: 'success' | 'error') => void;
 }
 
@@ -136,6 +140,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   isTripActive = false,
   onSimulateConnect,
   onSimulateDisconnect,
+  onOpenCalibration,
   showNotification
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -214,7 +219,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setNotificationStatus(getNotificationStatus());
   };
 
-  const handleRunTestNotification = async (type: 'started' | 'ended' | 'verification') => {
+  const handleRunTestNotification = async (type: 'started' | 'ended' | 'verification' | 'calibration') => {
     if (notificationStatus.permission !== 'granted') {
       const granted = await requestNotificationPermission();
       if (!granted) {
@@ -229,7 +234,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     try {
       const ok = await sendTestNotification(type, distanceUnit);
       if (ok) {
-        const label = type === 'started' ? 'Trip Started' : type === 'ended' ? 'Trip Ended' : 'Trips Awaiting Verification';
+        const label = type === 'started'
+          ? 'Trip Started'
+          : type === 'ended'
+          ? 'Trip Ended'
+          : type === 'calibration'
+          ? 'Monthly Calibration'
+          : 'Trips Awaiting Verification';
         showNotification?.(`Sent test ${label} notification!`, "success");
       } else {
         showNotification?.("Could not display notification. Check browser permissions.", "error");
@@ -387,7 +398,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         {/* Workflow Tab Bar - Stacked Grid so all options are visible without swiping */}
         <div className="bg-gray-50/95 border-b border-gray-200/80 p-2 shrink-0">
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+          <div className="grid grid-cols-3 gap-1.5">
             {/* Tab 1: Setup */}
             <button
               type="button"
@@ -399,7 +410,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               }`}
             >
               <Car size={14} className={activeWorkflowTab === 'setup' ? 'text-indigo-600' : 'text-gray-400'} />
-              <span className="truncate">1. Setup & Cars</span>
+              <span className="truncate">1. Cars</span>
             </button>
 
             {/* Tab 2: Automation */}
@@ -413,10 +424,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               }`}
             >
               <Zap size={14} className={activeWorkflowTab === 'automation' ? 'text-amber-500 fill-amber-500' : 'text-gray-400'} />
-              <span className="truncate">2. GPS & Auto</span>
+              <span className="truncate">2. Auto</span>
             </button>
 
-            {/* Tab 3: Notifications */}
+            {/* Tab 3: Home & Work */}
+            <button
+              type="button"
+              onClick={() => setActiveWorkflowTab('locations')}
+              className={`flex items-center justify-center space-x-1.5 px-2 py-2 rounded-xl text-xs font-bold transition text-center ${
+                activeWorkflowTab === 'locations'
+                  ? 'bg-white text-emerald-700 shadow-sm border border-emerald-300'
+                  : 'text-gray-600 hover:text-gray-900 hover:bg-white/60 bg-gray-100/50'
+              }`}
+            >
+              <Home size={14} className={activeWorkflowTab === 'locations' ? 'text-emerald-600' : 'text-gray-400'} />
+              <span className="truncate">3. Home & Work</span>
+            </button>
+
+            {/* Tab 4: Notifications */}
             <button
               type="button"
               onClick={() => setActiveWorkflowTab('notifications')}
@@ -427,13 +452,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               }`}
             >
               <Bell size={14} className={activeWorkflowTab === 'notifications' ? 'text-indigo-600' : 'text-gray-400'} />
-              <span className="truncate">3. Notifications</span>
+              <span className="truncate">4. Alerts</span>
               {notificationStatus.enabled && (
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 shrink-0" />
               )}
             </button>
 
-            {/* Tab 4: Data */}
+            {/* Tab 5: Data */}
             <button
               type="button"
               onClick={() => setActiveWorkflowTab('data')}
@@ -444,10 +469,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               }`}
             >
               <HardDrive size={14} className={activeWorkflowTab === 'data' ? 'text-emerald-600' : 'text-gray-400'} />
-              <span className="truncate">4. Backup & Data</span>
+              <span className="truncate">5. Backup</span>
             </button>
 
-            {/* Tab 5: Guide */}
+            {/* Tab 6: Guide */}
             <button
               type="button"
               onClick={() => setActiveWorkflowTab('guide')}
@@ -458,21 +483,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               }`}
             >
               <BookOpen size={14} className={activeWorkflowTab === 'guide' ? 'text-blue-600' : 'text-gray-400'} />
-              <span className="truncate">5. User Guide</span>
-            </button>
-
-            {/* Tab 6: About & Updates */}
-            <button
-              type="button"
-              onClick={() => setActiveWorkflowTab('about')}
-              className={`flex items-center justify-center space-x-1.5 px-2 py-2 rounded-xl text-xs font-bold transition text-center ${
-                activeWorkflowTab === 'about'
-                  ? 'bg-white text-indigo-700 shadow-sm border border-gray-200/80'
-                  : 'text-gray-600 hover:text-gray-900 hover:bg-white/60 bg-gray-100/50'
-              }`}
-            >
-              <Info size={14} className={activeWorkflowTab === 'about' ? 'text-purple-600' : 'text-gray-400'} />
-              <span className="truncate">6. App Info</span>
+              <span className="truncate">6. Guide</span>
             </button>
           </div>
         </div>
@@ -656,6 +667,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                               )}
                             </div>
                             <div className="flex items-center space-x-1">
+                              {onOpenCalibration && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    onClose();
+                                    onOpenCalibration(reg);
+                                  }}
+                                  className="text-amber-700 hover:text-amber-900 bg-amber-50 hover:bg-amber-100 px-2 py-0.5 rounded-lg text-[10px] font-bold transition flex items-center gap-1 border border-amber-200"
+                                  title="Calibrate physical dashboard cluster"
+                                >
+                                  <Gauge size={11} />
+                                  <span>Calibrate</span>
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => startEditingVehicle(reg)}
@@ -968,10 +993,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setActiveWorkflowTab('notifications')}
+                  onClick={() => setActiveWorkflowTab('locations')}
                   className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition flex items-center space-x-1.5 shadow-sm"
                 >
-                  <span>Next: Notifications</span>
+                  <span>Next: Home & Work</span>
                   <ArrowRight size={13} />
                 </button>
               </div>
@@ -980,7 +1005,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           )}
 
           {/* ========================================================================= */}
-          {/* TAB 3: NOTIFICATIONS & DRIVE ALERTS                                       */}
+          {/* TAB 3: HOME & WORK LOCATIONS (ATO COMMUTE RULES)                          */}
+          {/* ========================================================================= */}
+          {activeWorkflowTab === 'locations' && (
+            <div className="space-y-5 animate-fade-in">
+              <HomeWorkLocationSettings showNotification={showNotification} />
+
+              {/* Navigation buttons */}
+              <div className="flex justify-between pt-2 border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => setActiveWorkflowTab('automation')}
+                  className="px-3 py-1.5 text-gray-600 hover:text-gray-900 text-xs font-semibold"
+                >
+                  ← Back to GPS & Auto
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveWorkflowTab('notifications')}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition flex items-center space-x-1.5 shadow-sm"
+                >
+                  <span>Next: Notifications</span>
+                  <ArrowRight size={13} />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ========================================================================= */}
+          {/* TAB 4: NOTIFICATIONS & DRIVE ALERTS                                       */}
           {/* ========================================================================= */}
           {activeWorkflowTab === 'notifications' && (
             <div className="space-y-5 animate-fade-in">
@@ -1196,6 +1249,49 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     >
                       <Bell size={11} />
                       <span>{testNotificationRunning === 'verification' ? 'Sending...' : 'Test Verification Alert'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Trigger 4: Monthly Odometer Calibration */}
+                <div className="bg-white rounded-xl p-3.5 border border-gray-200/90 shadow-2xs space-y-2.5">
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-start space-x-2.5 pr-2">
+                      <div className="p-1.5 bg-amber-50 text-amber-600 rounded-lg mt-0.5 shrink-0">
+                        <Gauge size={13} />
+                      </div>
+                      <div>
+                        <div className="font-bold text-gray-900 text-xs flex items-center gap-1.5">
+                          <span>Monthly Odometer Calibration Due</span>
+                          <span className="text-[9px] bg-amber-100 text-amber-800 font-bold px-1.5 py-0.2 rounded">
+                            ATO Compliance
+                          </span>
+                        </div>
+                        <p className="text-[10.5px] text-gray-500 leading-snug mt-0.5">
+                          Alerts automatically when your phone disconnects from car Bluetooth or every 30 days until your physical dashboard cluster is synchronized.
+                        </p>
+                      </div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={notificationPrefs.notifyCalibrationDue}
+                        onChange={() => handleTogglePref('notifyCalibrationDue')}
+                        className="sr-only peer"
+                      />
+                      <div className="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-600"></div>
+                    </label>
+                  </div>
+
+                  <div className="flex justify-end pt-1 border-t border-gray-100">
+                    <button
+                      type="button"
+                      disabled={testNotificationRunning === 'calibration'}
+                      onClick={() => handleRunTestNotification('calibration')}
+                      className="px-2.5 py-1 text-[11px] font-semibold text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg transition flex items-center space-x-1"
+                    >
+                      <Bell size={11} />
+                      <span>{testNotificationRunning === 'calibration' ? 'Sending...' : 'Test Calibration Alert'}</span>
                     </button>
                   </div>
                 </div>

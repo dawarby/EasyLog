@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { Trip } from '../types';
-import { Calendar, Download, FileText, Briefcase, Plus, Pencil, User, XCircle, Filter, Car, Calculator, History, Navigation, MapPin, Bluetooth, Clock, FileCheck } from 'lucide-react';
+import { Calendar, Download, FileText, Briefcase, Plus, Pencil, User, XCircle, Filter, Car, Calculator, History, Navigation, MapPin, Bluetooth, Clock, FileCheck, Gauge } from 'lucide-react';
 
 interface TripHistoryProps {
   trips: Trip[];
@@ -390,6 +390,17 @@ export const TripHistory: React.FC<TripHistoryProps> = ({
                        <Clock size={10} className="mr-1 text-amber-700" />
                        Awaiting Verification
                      </button>
+                   )}
+
+                   {/* ATO Calibration Entry Badge */}
+                   {trip.isCalibration && (
+                     <span
+                       className="flex items-center text-[10px] font-bold text-amber-900 bg-amber-100/90 px-2 py-0.5 rounded-full border border-amber-300 shadow-2xs"
+                       title="ATO Odometer Calibration & Baseline Sync"
+                     >
+                       <Gauge size={10} className="mr-1 text-amber-700" />
+                       ATO Calibration Sync
+                     </span>
                    )}
 
                    {/* Trip Type Badge */}
