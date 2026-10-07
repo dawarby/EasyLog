@@ -16,7 +16,7 @@ import { TripVerificationModal } from './components/TripVerificationModal';
 import { OdometerCalibrationModal } from './components/OdometerCalibrationModal';
 import { CalibrationReminderBanner } from './components/CalibrationReminderBanner';
 import { calculateDistance, reverseGeocode, isPlaceholderAddress, requestScreenWakeLock, releaseScreenWakeLock, playTripStartTone, playTripEndTone, triggerHaptic, getCurrentPosition } from './services/gpsService';
-import { getStoredBluetoothConfig, saveBluetoothConfig, STORAGE_KEY_PASSENGER_MODE, DEFAULT_BT_CONFIG, syncWithNativeAndroidBridge } from './services/bluetoothService';
+import { getStoredBluetoothConfig, saveBluetoothConfig, STORAGE_KEY_PASSENGER_MODE, DEFAULT_BT_CONFIG, syncWithNativeAndroidBridge, getVehicleForBluetoothDevice } from './services/bluetoothService';
 import { getVehicleCalibrationStatus, getOverdueVehicles } from './services/odometerCalibrationService';
 import { sendCalibrationReminderNotification } from './services/pushNotificationService';
 import { getStoredHomeWorkConfig, evaluateTripPurpose, isLocationMatch } from './services/locationConfigService';
@@ -145,7 +145,7 @@ export default function App() {
 
   // Filter State
   const fy = getFYDefaults();
-  const [filterType, setFilterType] = useState<'all' | 'work' | 'personal' | 'unverified'>('all');
+  const [filterType, setFilterType] = useState<'all' | 'work' | 'personal' | 'unverified' | 'gps'>('all');
   const [filterRego, setFilterRego] = useState<string>('');
   const [startDate, setStartDate] = useState<string>(fy.start);
   const [endDate, setEndDate] = useState<string>(fy.end);
@@ -254,31 +254,40 @@ export default function App() {
 
     let loadedHistory: Trip[] = [];
 
-    // 1. Load History
-    if (savedTrips) {
-      try {
-        const parsed = JSON.parse(savedTrips);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          loadedHistory = parsed;
-          // Ensure demo-2 or first trip is pending if none have a verification status, so the user sees the verification banner right away
-          const hasAnyPending = loadedHistory.some(t => t.verificationStatus === 'pending');
-          const hasAnyStatus = loadedHistory.some(t => t.verificationStatus !== undefined);
-          if (!hasAnyPending && !hasAnyStatus) {
-            loadedHistory = loadedHistory.map((t, idx) => {
-              if (t.id === 'demo-2' || (idx === 0 && t.status === 'completed')) {
-                return { ...t, verificationStatus: 'pending' as const };
-              }
-              return { ...t, verificationStatus: 'verified' as const };
-            });
+    // 1. Load History (check both easylog_trips and snaplog_trips and backups)
+    try {
+      const easyRaw = localStorage.getItem(STORAGE_KEY_TRIPS);
+      const snapRaw = localStorage.getItem('snaplog_trips');
+      const easyTrips: Trip[] = easyRaw ? JSON.parse(easyRaw) : [];
+      const snapTrips: Trip[] = snapRaw ? JSON.parse(snapRaw) : [];
+
+      // Combine trips from both keys by unique ID (prioritizing non-demo trips)
+      const tripDict: Record<string, Trip> = {};
+      snapTrips.forEach((t: Trip) => { if (t && t.id) tripDict[t.id] = t; });
+      easyTrips.forEach((t: Trip) => { if (t && t.id) tripDict[t.id] = t; });
+
+      const combined: Trip[] = Object.values(tripDict);
+      const hasRealTrips = combined.some((t: Trip) => !t.id.startsWith('demo-'));
+      const effectiveCombined = hasRealTrips ? combined.filter((t: Trip) => !t.id.startsWith('demo-')) : combined;
+
+      if (effectiveCombined.length > 0) {
+        loadedHistory = effectiveCombined;
+      } else {
+        // Also check if any backup has saved trips
+        const backupsRaw = localStorage.getItem(STORAGE_KEY_BACKUPS) || localStorage.getItem('snaplog_backups');
+        if (backupsRaw) {
+          const parsedBackups: Backup[] = JSON.parse(backupsRaw);
+          if (Array.isArray(parsedBackups) && parsedBackups.length > 0 && parsedBackups[0]?.data?.length > 0) {
+            loadedHistory = parsedBackups[0].data;
           }
-        } else {
-          loadedHistory = DEMO_TRIPS;
         }
-      } catch (e) {
-        console.error("Failed to parse history", e);
+      }
+
+      if (loadedHistory.length === 0) {
         loadedHistory = DEMO_TRIPS;
       }
-    } else {
+    } catch (e) {
+      console.error("Failed to parse history", e);
       loadedHistory = DEMO_TRIPS;
     }
     setHistory(loadedHistory);
@@ -404,8 +413,10 @@ export default function App() {
 
     // 2. Native Android Play Store Bridge (Zero-Tasker Direct Bluetooth Broadcast)
     const handleNativeConnect = (event: any) => {
-      const vehicle = event?.detail?.vehicle || bluetoothConfig.vehicleReg;
-      handleStartBluetoothTrip(vehicle);
+      const vehicle = event?.detail?.vehicle;
+      const device = event?.detail?.device;
+      const macAddress = event?.detail?.macAddress;
+      handleStartBluetoothTrip(vehicle, device, macAddress);
     };
 
     const handleNativeDisconnect = () => {
@@ -418,8 +429,8 @@ export default function App() {
     // Direct interface for Native Android WebView JavascriptInterface
     (window as any).EasyLogNative = {
       isNative: true,
-      onBluetoothConnected: (device?: string, vehicle?: string) => {
-        handleStartBluetoothTrip(vehicle || bluetoothConfig.vehicleReg);
+      onBluetoothConnected: (device?: string, vehicle?: string, macAddress?: string) => {
+        handleStartBluetoothTrip(vehicle, device, macAddress);
       },
       onBluetoothDisconnected: () => {
         handleEndBluetoothTrip();
@@ -874,7 +885,7 @@ export default function App() {
     }
   };
 
-  const handleStartBluetoothTrip = async (customVehicle?: string) => {
+  const handleStartBluetoothTrip = async (customVehicle?: string, triggeredByDevice?: string, macAddress?: string) => {
     if (passengerMode) {
       showNotification("Passenger Mode is active. Auto-tracking skipped to prevent logging passenger travel.", "error");
       return;
@@ -885,11 +896,30 @@ export default function App() {
       return;
     }
 
-    const targetVehicle = (customVehicle || bluetoothConfig.vehicleReg || vehicles[0] || 'MY-CAR').toUpperCase();
+    // Resolve vehicle registration & preferences using multi-vehicle Bluetooth allocation mapping
+    // Unchanging MAC address is prioritized first, then friendly device name
+    let allocatedVehicle = customVehicle;
+    let allocatedTripType = bluetoothConfig.defaultTripType || 'work';
+    let matchedDeviceName = triggeredByDevice;
+
+    if (triggeredByDevice || macAddress) {
+      const match = getVehicleForBluetoothDevice(triggeredByDevice, bluetoothConfig, macAddress);
+      if (match.vehicleReg && !customVehicle) {
+        allocatedVehicle = match.vehicleReg;
+      }
+      if (match.tripType) {
+        allocatedTripType = match.tripType;
+      }
+      if (match.matchedMapping?.deviceName) {
+        matchedDeviceName = match.matchedMapping.deviceName;
+      }
+    }
+
+    const targetVehicle = (allocatedVehicle || bluetoothConfig.vehicleReg || vehicles[0] || 'MY-CAR').toUpperCase();
     updateVehiclesList(targetVehicle);
 
     const startOdo = getLastKnownOdoForVehicle(targetVehicle) || 0;
-    let targetTripType = bluetoothConfig.defaultTripType || 'work';
+    let targetTripType = allocatedTripType;
 
     let startLoc: LocationPoint = {
       latitude: 0,
@@ -1005,9 +1035,10 @@ export default function App() {
 
     const hwConfigOnStart = getStoredHomeWorkConfig();
     const isHomeStart = hwConfigOnStart.autoDetectHomeAsPersonal && isLocationMatch(startLoc, hwConfigOnStart.home);
+    const devLabel = matchedDeviceName ? ` (${matchedDeviceName})` : '';
     const startMsg = isHomeStart
-      ? `🚗 Connected to Car! Auto-tracking started for ${targetVehicle} (Home: Personal Commute)`
-      : `🚗 Connected to Car! Auto-tracking started for ${targetVehicle}`;
+      ? `🚗 Connected to Car${devLabel}! Auto-tracking started for ${targetVehicle} (Home: Personal Commute)`
+      : `🚗 Connected to Car${devLabel}! Auto-tracking started for ${targetVehicle}`;
     showNotification(startMsg, "success");
   };
 
@@ -1485,8 +1516,9 @@ export default function App() {
     const unitLabel = distanceUnit === 'km' ? 'km' : 'mi';
 
     const exportTrips = dateRangeTrips.filter(trip => {
-      const typeMatch = filterType === 'all' || (trip.tripType || 'work') === filterType;
-      return typeMatch;
+      if (filterType === 'unverified') return trip.verificationStatus === 'pending';
+      if (filterType === 'gps') return trip.trackingMode === 'gps' || trip.triggerSource === 'bluetooth';
+      return filterType === 'all' || (trip.tripType || 'work') === filterType;
     });
 
     const headers = ['Start Date', 'Start Time', `Start Odometer (${unitLabel})`, 'End Date', 'End Time', `End Odometer (${unitLabel})`, `Distance (${unitLabel})`, 'Registration', 'Type', 'Tracking Mode', 'Client Name', 'Start Location', 'End Location', 'Status', 'Reason/Notes'];
@@ -2051,6 +2083,7 @@ export default function App() {
         {/* History List */}
         <TripHistory 
           trips={history} 
+          activeTrip={activeTrip}
           onExport={handleExport}
           onEdit={handleEditTrip}
           onAddManual={handleAddManual}
@@ -2258,8 +2291,9 @@ export default function App() {
             saveBluetoothConfig(newConfig);
           }}
           vehicles={vehicles}
+          onAddVehicle={updateVehiclesList}
           isTripActive={!!activeTrip}
-          onSimulateConnect={() => handleStartBluetoothTrip()}
+          onSimulateConnect={(v, d, mac) => handleStartBluetoothTrip(v, d, mac)}
           onSimulateDisconnect={() => handleEndBluetoothTrip()}
           showNotification={showNotification}
         />

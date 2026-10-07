@@ -24,13 +24,32 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val fineLocationGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
+        val cameraGranted = permissions[Manifest.permission.CAMERA] ?: false
         val btConnectGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions[Manifest.permission.BLUETOOTH_CONNECT] ?: false
         } else true
 
-        if (fineLocationGranted && btConnectGranted) {
-            Toast.makeText(this, "EasyLog permissions active for Bluetooth and GPS tracking", Toast.LENGTH_SHORT).show()
+        if (fineLocationGranted && cameraGranted && btConnectGranted) {
+            Toast.makeText(this, "EasyLog permissions active for Camera, Bluetooth, and GPS", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
+
+    private val fileChooserLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val data = result.data
+        val uris = when {
+            data?.clipData != null -> {
+                val count = data.clipData!!.itemCount
+                Array(count) { i -> data.clipData!!.getItemAt(i).uri }
+            }
+            data?.data != null -> arrayOf(data.data!!)
+            else -> null
+        }
+        fileChooserCallback?.onReceiveValue(uris)
+        fileChooserCallback = null
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -52,6 +71,33 @@ class MainActivity : AppCompatActivity() {
                     callback: GeolocationPermissions.Callback?
                 ) {
                     callback?.invoke(origin, true, false)
+                }
+
+                override fun onPermissionRequest(request: PermissionRequest?) {
+                    // Automatically grant camera and audio permissions requested by web app
+                    runOnUiThread {
+                        request?.grant(request.resources)
+                    }
+                }
+
+                override fun onShowFileChooser(
+                    webView: WebView?,
+                    filePathCallback: ValueCallback<Array<Uri>>?,
+                    fileChooserParams: FileChooserParams?
+                ): Boolean {
+                    fileChooserCallback?.onReceiveValue(null)
+                    fileChooserCallback = filePathCallback
+
+                    val intent = fileChooserParams?.createIntent() ?: android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).apply {
+                        type = "image/*"
+                    }
+                    try {
+                        fileChooserLauncher.launch(intent)
+                    } catch (e: Exception) {
+                        fileChooserCallback = null
+                        return false
+                    }
+                    return true
                 }
             }
 
@@ -77,6 +123,9 @@ class MainActivity : AppCompatActivity() {
     private fun requestRequiredPermissions() {
         val needed = mutableListOf<String>()
 
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.CAMERA)
+        }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             needed.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
@@ -99,15 +148,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    fun notifyJsBluetoothConnected(deviceName: String) {
+    fun notifyJsBluetoothConnected(deviceName: String, deviceAddress: String = "") {
         val safeName = deviceName.replace("'", "\\'")
+        val safeAddress = deviceAddress.replace("'", "\\'")
         webView.evaluateJavascript(
             """
             (function() {
                 if (window.EasyLogNative && typeof window.EasyLogNative.onBluetoothConnected === 'function') {
-                    window.EasyLogNative.onBluetoothConnected('$safeName');
+                    window.EasyLogNative.onBluetoothConnected('$safeName', null, '$safeAddress');
                 } else {
-                    window.dispatchEvent(new CustomEvent('android_bluetooth_connected', { detail: { device: '$safeName' } }));
+                    window.dispatchEvent(new CustomEvent('android_bluetooth_connected', { detail: { device: '$safeName', macAddress: '$safeAddress' } }));
                 }
             })();
             """.trimIndent(),

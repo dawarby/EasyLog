@@ -42,6 +42,12 @@ class CarBluetoothReceiver : BroadcastReceiver() {
             "Bluetooth Device (Permission restricted)"
         }
 
+        val deviceAddress = try {
+            device?.address ?: ""
+        } catch (e: SecurityException) {
+            ""
+        }
+
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val configuredCarName = prefs.getString(KEY_PAIRED_CAR_NAME, "")?.trim()
         val isPassengerMode = prefs.getBoolean(KEY_PASSENGER_MODE, false)
@@ -82,7 +88,7 @@ class CarBluetoothReceiver : BroadcastReceiver() {
 
                 // If MainActivity is active in foreground/background, dispatch JS event directly
                 MainActivity.instance?.runOnUiThread {
-                    MainActivity.instance?.notifyJsBluetoothConnected(deviceName)
+                    MainActivity.instance?.notifyJsBluetoothConnected(deviceName, deviceAddress)
                 }
             }
 

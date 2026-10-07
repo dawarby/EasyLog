@@ -4,11 +4,12 @@ import { Calendar, Download, FileText, Briefcase, Plus, Pencil, User, XCircle, F
 
 interface TripHistoryProps {
   trips: Trip[];
+  activeTrip?: Trip | null;
   onExport: () => void;
   onEdit: (trip: Trip) => void;
   onAddManual: () => void;
-  filterType: 'all' | 'work' | 'personal' | 'unverified';
-  onFilterTypeChange: (type: 'all' | 'work' | 'personal' | 'unverified') => void;
+  filterType: 'all' | 'work' | 'personal' | 'unverified' | 'gps';
+  onFilterTypeChange: (type: 'all' | 'work' | 'personal' | 'unverified' | 'gps') => void;
   startDate: string;
   onStartDateChange: (date: string) => void;
   endDate: string;
@@ -24,6 +25,7 @@ interface TripHistoryProps {
 
 export const TripHistory: React.FC<TripHistoryProps> = ({ 
   trips, 
+  activeTrip,
   onExport, 
   onEdit, 
   onAddManual,
@@ -88,13 +90,27 @@ export const TripHistory: React.FC<TripHistoryProps> = ({
     const pendingDist = dateRangeTrips
       .filter(t => t.verificationStatus === 'pending')
       .reduce((acc, t) => acc + (t.distance || 0), 0);
+    const gpsCount = dateRangeTrips.filter(t => t.trackingMode === 'gps' || t.triggerSource === 'bluetooth').length;
+    const totalGpsInHistory = trips.filter(t => t.trackingMode === 'gps' || t.triggerSource === 'bluetooth').length;
+    const tripsInOtherVehicles = filterRego ? trips.filter(t => t.registrationNumber && t.registrationNumber !== filterRego).length : 0;
     
-    return { totalDist, workDist, businessPercent, totalTrips, pendingCount, pendingDist };
-  }, [dateRangeTrips]);
+    return {
+      totalDist,
+      workDist,
+      businessPercent,
+      totalTrips,
+      pendingCount,
+      pendingDist,
+      gpsCount,
+      totalGpsInHistory,
+      tripsInOtherVehicles
+    };
+  }, [dateRangeTrips, trips, filterRego]);
 
   // Second Level Filter: Type (for display list)
   const displayTrips = dateRangeTrips.filter(trip => {
     if (filterType === 'unverified') return trip.verificationStatus === 'pending';
+    if (filterType === 'gps') return trip.trackingMode === 'gps' || trip.triggerSource === 'bluetooth';
     return filterType === 'all' || (trip.tripType || 'work') === filterType;
   });
 
@@ -128,10 +144,57 @@ export const TripHistory: React.FC<TripHistoryProps> = ({
 
   return (
     <div className="space-y-4">
+      {/* Active GPS Drive in Progress Notification Banner */}
+      {activeTrip && (
+        <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-emerald-100/60 border border-emerald-300 rounded-2xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 shadow-xs animate-fade-in">
+          <div className="flex items-center space-x-3">
+            <span className="relative flex h-3.5 w-3.5 shrink-0">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-600"></span>
+            </span>
+            <div>
+              <div className="text-xs font-bold text-emerald-950 flex flex-wrap items-center gap-1.5">
+                <Navigation size={13} className="text-emerald-700" />
+                <span>Active GPS Drive Currently Tracking</span>
+                {activeTrip.registrationNumber && (
+                  <span className="font-mono text-[10.5px] bg-emerald-200/80 text-emerald-900 px-2 py-0.5 rounded-md font-bold">
+                    {activeTrip.registrationNumber}
+                  </span>
+                )}
+                {activeTrip.triggerSource === 'bluetooth' && (
+                  <span className="text-[10px] bg-blue-100 text-blue-800 px-1.5 py-0.2 rounded font-semibold flex items-center gap-0.5">
+                    <Bluetooth size={10} />
+                    Car BT Auto
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-emerald-800 mt-0.5">
+                Your drive is live in the HUD above! When you reach your destination or disconnect Bluetooth, it automatically finalizes and appears in this history list.
+              </p>
+            </div>
+          </div>
+          {onViewMap && (
+            <button
+              type="button"
+              onClick={() => onViewMap(activeTrip)}
+              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1 shadow-2xs shrink-0 self-start sm:self-auto"
+            >
+              <Navigation size={12} />
+              <span>View Live Route</span>
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="flex flex-col gap-4">
         {/* Header and Actions */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-1">
-          <h3 className="text-lg font-semibold text-gray-800">Trip History</h3>
+          <div className="flex items-center gap-2">
+            <h3 className="text-lg font-semibold text-gray-800">Trip History</h3>
+            <span className="text-xs font-bold text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">
+              {displayTrips.length} {displayTrips.length === 1 ? 'trip' : 'trips'}
+            </span>
+          </div>
           <div className="flex flex-wrap gap-2">
             {onOpenVerificationQueue && (
               <button
@@ -275,6 +338,19 @@ export const TripHistory: React.FC<TripHistoryProps> = ({
                         <span>Needs Review ({stats.pendingCount})</span>
                     </button>
                   )}
+                  {/* Dedicated Auto & GPS Filter Pill */}
+                  <button 
+                      onClick={() => onFilterTypeChange('gps')}
+                      className={`px-2.5 py-1.5 text-xs font-bold rounded-md transition-all flex items-center justify-center space-x-1 ${
+                        filterType === 'gps' 
+                          ? 'bg-emerald-600 text-white shadow-sm' 
+                          : 'text-emerald-800 bg-emerald-50 hover:bg-emerald-100'
+                      }`}
+                      title="Show auto-saved GPS and car Bluetooth drives"
+                  >
+                      <Navigation size={11} />
+                      <span>Auto & GPS ({stats.gpsCount})</span>
+                  </button>
                   <button 
                       onClick={() => onFilterTypeChange('work')}
                       className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all flex items-center justify-center ${
@@ -344,6 +420,60 @@ export const TripHistory: React.FC<TripHistoryProps> = ({
                     )}
                 </div>
             </div>
+
+            {/* Explanatory Alerts for Active Filters */}
+            {filterRego && (
+              <div className="bg-blue-50/70 border border-blue-100 rounded-lg px-3 py-2 flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-xs text-blue-900">
+                <div className="flex items-center space-x-1.5">
+                  <Car size={13} className="text-blue-600 shrink-0" />
+                  <span>
+                    Filtered to vehicle <strong>{filterRego}</strong> ({displayTrips.length} matching).
+                    {stats.tripsInOtherVehicles > 0 && (
+                      <span className="text-blue-700 ml-1">
+                        ({stats.tripsInOtherVehicles} trip{stats.tripsInOtherVehicles === 1 ? '' : 's'} recorded under other vehicle registrations).
+                      </span>
+                    )}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onFilterRegoChange('')}
+                  className="font-bold underline text-blue-700 hover:text-blue-900 self-start sm:self-auto"
+                >
+                  Show All Vehicles
+                </button>
+              </div>
+            )}
+
+            {/* Notification if Unverified Trips Exist */}
+            {stats.pendingCount > 0 && filterType !== 'unverified' && (
+              <div className="bg-amber-50/80 border border-amber-200 rounded-lg px-3 py-2 flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-xs text-amber-900">
+                <div className="flex items-center space-x-1.5">
+                  <Clock size={13} className="text-amber-600 shrink-0" />
+                  <span>
+                    <strong>{stats.pendingCount} auto-saved trip{stats.pendingCount === 1 ? '' : 's'}</strong> in the Verification Queue awaiting ATO review.
+                  </span>
+                </div>
+                <div className="flex items-center space-x-2 self-start sm:self-auto">
+                  <button
+                    type="button"
+                    onClick={() => onFilterTypeChange('unverified')}
+                    className="font-bold underline text-amber-800 hover:text-amber-950 text-[11px]"
+                  >
+                    View in List
+                  </button>
+                  {onOpenVerificationQueue && (
+                    <button
+                      type="button"
+                      onClick={onOpenVerificationQueue}
+                      className="px-2 py-0.5 bg-amber-600 hover:bg-amber-700 text-white rounded text-[10.5px] font-bold shadow-2xs"
+                    >
+                      Review Queue
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
         </div>
       </div>
 
@@ -351,7 +481,12 @@ export const TripHistory: React.FC<TripHistoryProps> = ({
       {trips.length === 0 && (
         <div className="flex flex-col items-center justify-center py-12 text-gray-400 bg-white rounded-xl border border-dashed border-gray-300">
           <FileText size={48} className="mb-4 opacity-20" />
-          <p>No completed trips yet.</p>
+          <p className="font-semibold text-gray-600">No completed trips in logbook yet.</p>
+          <p className="text-xs text-gray-400 mt-1 max-w-sm text-center">
+            {activeTrip
+              ? 'A GPS trip is currently running above. Tap "End Trip" in the HUD to finalize it.'
+              : 'Start a drive with "Start GPS Trip" or connect to your car Bluetooth to automatically log trips.'}
+          </p>
           <button onClick={onAddManual} className="mt-4 text-indigo-600 text-sm font-semibold hover:underline">
             Add a trip manually
           </button>
@@ -360,12 +495,50 @@ export const TripHistory: React.FC<TripHistoryProps> = ({
 
       {/* Empty State for No Matches in Filter */}
       {trips.length > 0 && displayTrips.length === 0 && (
-         <div className="flex flex-col items-center justify-center py-12 text-gray-400 bg-white rounded-xl border border-dashed border-gray-300">
-          <Filter size={32} className="mb-3 opacity-20" />
-          <p className="text-sm">No trips found matching filters.</p>
-          <button onClick={clearAllFilters} className="mt-2 text-indigo-600 text-xs font-semibold hover:underline">
-              Clear all filters
-          </button>
+        <div className="flex flex-col items-center justify-center py-10 px-4 text-gray-500 bg-white rounded-xl border border-dashed border-gray-300 text-center space-y-2">
+          <Filter size={32} className="opacity-25 mx-auto" />
+          <p className="text-sm font-bold text-gray-700">No trips match your current filters.</p>
+          <div className="text-xs text-gray-500 max-w-md space-y-1">
+            {filterRego && (
+              <p>
+                • You are currently filtering for vehicle <strong>{filterRego}</strong>. Trips may be logged under another vehicle or without a registration.
+              </p>
+            )}
+            {(startDate || endDate) && (
+              <p>• A date range filter is active ({formatRangeDate(startDate)} to {formatRangeDate(endDate)}).</p>
+            )}
+            {filterType !== 'all' && (
+              <p>• Category filter is set to <strong>{filterType}</strong>.</p>
+            )}
+            {activeTrip && (
+              <p className="text-emerald-700 font-medium">
+                • A trip is currently active in the HUD above and has not been ended yet.
+              </p>
+            )}
+            {stats.pendingCount > 0 && (
+              <p className="text-amber-700 font-medium">
+                • You have <strong>{stats.pendingCount}</strong> trip(s) in the Verification Queue.
+              </p>
+            )}
+          </div>
+          <div className="pt-2 flex flex-wrap gap-2 justify-center">
+            <button
+              type="button"
+              onClick={clearAllFilters}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition shadow-xs"
+            >
+              Clear All Filters & Show All {trips.length} Trips
+            </button>
+            {onOpenVerificationQueue && stats.pendingCount > 0 && (
+              <button
+                type="button"
+                onClick={onOpenVerificationQueue}
+                className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold rounded-xl transition shadow-xs"
+              >
+                Open Verification Queue ({stats.pendingCount})
+              </button>
+            )}
+          </div>
         </div>
       )}
 

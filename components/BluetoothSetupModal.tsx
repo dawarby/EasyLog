@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   X,
   Bluetooth,
@@ -23,9 +23,19 @@ import {
   Layers,
   Terminal,
   AlertCircle,
-  Info
+  Info,
+  Search,
+  Plus,
+  Trash2,
+  RefreshCw,
+  RadioTower,
+  Sliders,
+  CheckCheck,
+  Cpu,
+  Edit3,
+  AlertTriangle
 } from 'lucide-react';
-import { BluetoothConfig } from '../types';
+import { BluetoothConfig, VehicleBluetoothMapping } from '../types';
 import {
   generateAutomationUrls,
   isWebBluetoothSupported,
@@ -33,7 +43,14 @@ import {
   disconnectBleBeacon,
   getActiveBleDeviceName,
   isNativeAndroidApp,
-  simulateNativeBluetoothEvent
+  simulateNativeBluetoothEvent,
+  requestWebBluetoothDevice,
+  COMMON_CAR_BLUETOOTH_PRESETS,
+  BluetoothDevicePreset,
+  formatMacAddressInput,
+  normalizeMacAddress,
+  isValidMacAddress,
+  generateDeviceHardwareMac
 } from '../services/bluetoothService';
 
 interface BluetoothSetupModalProps {
@@ -42,8 +59,9 @@ interface BluetoothSetupModalProps {
   config: BluetoothConfig;
   onSaveConfig: (newConfig: BluetoothConfig) => void;
   vehicles: string[];
+  onAddVehicle?: (reg: string) => void;
   isTripActive: boolean;
-  onSimulateConnect: () => void;
+  onSimulateConnect: (vehicle?: string, device?: string, macAddress?: string) => void;
   onSimulateDisconnect: () => void;
   showNotification: (msg: string, type?: 'success' | 'error') => void;
 }
@@ -54,6 +72,7 @@ export const BluetoothSetupModal: React.FC<BluetoothSetupModalProps> = ({
   config,
   onSaveConfig,
   vehicles,
+  onAddVehicle,
   isTripActive,
   onSimulateConnect,
   onSimulateDisconnect,
@@ -65,11 +84,336 @@ export const BluetoothSetupModal: React.FC<BluetoothSetupModalProps> = ({
   const [bleStatus, setBleStatus] = useState<string | null>(getActiveBleDeviceName());
   const [isBleConnecting, setIsBleConnecting] = useState(false);
 
-  // Form states
-  const [deviceName, setDeviceName] = useState(config.deviceName || '');
-  const [selectedVehicle, setSelectedVehicle] = useState(config.vehicleReg || (vehicles[0] || ''));
-  const [defaultTripType, setDefaultTripType] = useState<'work' | 'personal'>(config.defaultTripType || 'work');
-  const [autoEndTrip, setAutoEndTrip] = useState(config.autoEndTrip ?? true);
+  // Local vehicle list to reflect newly added registrations immediately
+  const [localVehicles, setLocalVehicles] = useState<string[]>(vehicles);
+
+  useEffect(() => {
+    setLocalVehicles((prev) => {
+      const merged = Array.from(new Set([...prev, ...vehicles])).sort();
+      return merged;
+    });
+  }, [vehicles]);
+
+  // Selected vehicle currently being allocated
+  const [selectedVehicle, setSelectedVehicle] = useState<string>(() => {
+    return config.vehicleReg || (vehicles.length > 0 ? vehicles[0] : '');
+  });
+
+  // Multi-vehicle Bluetooth allocations state
+  const [mappings, setMappings] = useState<VehicleBluetoothMapping[]>(() => {
+    if (config.vehicleMappings && config.vehicleMappings.length > 0) {
+      return [...config.vehicleMappings];
+    }
+    if (config.vehicleReg) {
+      return [{
+        vehicleReg: config.vehicleReg,
+        deviceName: config.deviceName || '',
+        deviceMacAddress: config.deviceMacAddress || '',
+        defaultTripType: config.defaultTripType || 'work',
+        autoEndTrip: config.autoEndTrip ?? true
+      }];
+    }
+    return [];
+  });
+
+  // Inline "Add New Vehicle Registration" state
+  const [newVehicleInput, setNewVehicleInput] = useState<string>('');
+
+  // Device search & scanner states
+  const [deviceSearchQuery, setDeviceSearchQuery] = useState<string>('');
+  const [selectedDeviceCategory, setSelectedDeviceCategory] = useState<string>('All');
+  const [isScanningBluetooth, setIsScanningBluetooth] = useState<boolean>(false);
+  const [discoveredDevices, setDiscoveredDevices] = useState<{
+    id: string;
+    name: string;
+    macAddress: string;
+    category: string;
+    brand: string;
+  }[]>([]);
+  const [customDeviceName, setCustomDeviceName] = useState<string>('');
+  const [customDeviceMac, setCustomDeviceMac] = useState<string>('');
+
+  // Inline MAC address editing per vehicle
+  const [editingMacVehicle, setEditingMacVehicle] = useState<string | null>(null);
+  const [editingMacInput, setEditingMacInput] = useState<string>('');
+
+  // Synchronize when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      const initialVeh = config.vehicleReg || (vehicles.length > 0 ? vehicles[0] : '');
+      setSelectedVehicle(initialVeh);
+      if (config.vehicleMappings && config.vehicleMappings.length > 0) {
+        setMappings([...config.vehicleMappings]);
+      } else if (config.vehicleReg) {
+        setMappings([{
+          vehicleReg: config.vehicleReg,
+          deviceName: config.deviceName || '',
+          deviceMacAddress: config.deviceMacAddress || '',
+          defaultTripType: config.defaultTripType || 'work',
+          autoEndTrip: config.autoEndTrip ?? true
+        }]);
+      }
+    }
+  }, [isOpen, config, vehicles]);
+
+  // Ensure every vehicle in localVehicles has at least an entry in mappings for display
+  const allVehicleAllocations = useMemo(() => {
+    return localVehicles.map((v) => {
+      const existing = mappings.find((m) => m.vehicleReg === v);
+      return existing || {
+        vehicleReg: v,
+        deviceName: '',
+        deviceMacAddress: '',
+        defaultTripType: 'work' as const,
+        autoEndTrip: true
+      };
+    });
+  }, [localVehicles, mappings]);
+
+  // Selected vehicle's current allocation
+  const currentAllocation = useMemo(() => {
+    return mappings.find((m) => m.vehicleReg === selectedVehicle) || {
+      vehicleReg: selectedVehicle,
+      deviceName: '',
+      deviceMacAddress: '',
+      defaultTripType: 'work' as const,
+      autoEndTrip: true
+    };
+  }, [mappings, selectedVehicle]);
+
+  // Handle adding new vehicle registration directly in this screen
+  const handleAddNewVehicle = () => {
+    const trimmed = newVehicleInput.trim().toUpperCase();
+    if (!trimmed) {
+      showNotification('Please enter a vehicle registration number.', 'error');
+      return;
+    }
+
+    if (localVehicles.includes(trimmed)) {
+      showNotification(`Vehicle ${trimmed} is already in your fleet.`, 'error');
+      setSelectedVehicle(trimmed);
+      setNewVehicleInput('');
+      return;
+    }
+
+    // Call prop to update parent App.tsx state
+    onAddVehicle?.(trimmed);
+
+    // Update local state immediately
+    setLocalVehicles((prev) => [...prev, trimmed].sort());
+    setSelectedVehicle(trimmed);
+
+    // Initialize an allocation mapping for this new vehicle
+    setMappings((prev) => {
+      if (prev.some((m) => m.vehicleReg === trimmed)) return prev;
+      return [
+        ...prev,
+        {
+          vehicleReg: trimmed,
+          deviceName: '',
+          deviceMacAddress: '',
+          defaultTripType: 'work',
+          autoEndTrip: true
+        }
+      ];
+    });
+
+    setNewVehicleInput('');
+    showNotification(`Vehicle "${trimmed}" added! Now select its allocated Bluetooth device below.`, 'success');
+  };
+
+  // Handle allocating a Bluetooth device to a vehicle with both friendly name & MAC address
+  const handleAllocateDevice = (
+    targetVehicle: string,
+    deviceNameToAllocate: string,
+    macAddressToAllocate?: string,
+    deviceIdToAllocate?: string
+  ) => {
+    if (!targetVehicle) {
+      showNotification('Please select or add a vehicle first.', 'error');
+      return;
+    }
+
+    const cleanDevName = deviceNameToAllocate.trim();
+    if (!cleanDevName) {
+      showNotification('Please enter a valid device name.', 'error');
+      return;
+    }
+
+    // Resolve or generate unchanging MAC address
+    const cleanMacInput = macAddressToAllocate?.trim();
+    const finalMac = cleanMacInput
+      ? normalizeMacAddress(cleanMacInput)
+      : generateDeviceHardwareMac(cleanDevName);
+
+    // Check if another vehicle already uses this Bluetooth device / MAC
+    const existingConflictingVehicle = mappings.find(
+      (m) =>
+        m.vehicleReg !== targetVehicle &&
+        m.deviceName &&
+        ((m.deviceMacAddress && finalMac && normalizeMacAddress(m.deviceMacAddress) === finalMac) ||
+          m.deviceName.trim().toLowerCase() === cleanDevName.toLowerCase())
+    );
+
+    setMappings((prev) => {
+      const index = prev.findIndex((m) => m.vehicleReg === targetVehicle);
+      if (index >= 0) {
+        const copy = [...prev];
+        copy[index] = {
+          ...copy[index],
+          deviceName: cleanDevName,
+          deviceMacAddress: finalMac,
+          deviceId: deviceIdToAllocate || copy[index].deviceId
+        };
+        return copy;
+      }
+      return [
+        ...prev,
+        {
+          vehicleReg: targetVehicle,
+          deviceName: cleanDevName,
+          deviceMacAddress: finalMac,
+          deviceId: deviceIdToAllocate,
+          defaultTripType: 'work',
+          autoEndTrip: true
+        }
+      ];
+    });
+
+    if (existingConflictingVehicle) {
+      showNotification(
+        `Allocated "${cleanDevName}" (MAC: ${finalMac}) to ${targetVehicle}. Note: Separate Bluetooth devices must be allocated per vehicle (already paired to ${existingConflictingVehicle.vehicleReg}).`,
+        'error'
+      );
+    } else {
+      showNotification(`Allocated "${cleanDevName}" (MAC: ${finalMac}) to ${targetVehicle}!`, 'success');
+    }
+  };
+
+  // Handle updating vehicle trip preferences
+  const handleUpdateVehiclePreference = (
+    targetVehicle: string,
+    updates: Partial<VehicleBluetoothMapping>
+  ) => {
+    setMappings((prev) => {
+      const index = prev.findIndex((m) => m.vehicleReg === targetVehicle);
+      if (index >= 0) {
+        const copy = [...prev];
+        copy[index] = { ...copy[index], ...updates };
+        return copy;
+      }
+      return [
+        ...prev,
+        {
+          vehicleReg: targetVehicle,
+          deviceName: '',
+          deviceMacAddress: '',
+          defaultTripType: 'work',
+          autoEndTrip: true,
+          ...updates
+        }
+      ];
+    });
+  };
+
+  // Remove a vehicle's Bluetooth allocation
+  const handleClearAllocation = (targetVehicle: string) => {
+    setMappings((prev) =>
+      prev.map((m) =>
+        m.vehicleReg === targetVehicle
+          ? { ...m, deviceName: '', deviceMacAddress: '', deviceId: undefined }
+          : m
+      )
+    );
+    showNotification(`Cleared Bluetooth allocation for ${targetVehicle}`, 'success');
+  };
+
+  // Live Bluetooth scanning using Web Bluetooth API
+  const handleScanWebBluetooth = async () => {
+    setIsScanningBluetooth(true);
+    try {
+      const res = await requestWebBluetoothDevice();
+      if (res.success && res.device) {
+        const dev = res.device;
+        const mac = dev.macAddress || generateDeviceHardwareMac(dev.name);
+        const newDeviceItem = {
+          id: dev.id || `bt-${Date.now()}`,
+          name: dev.name,
+          macAddress: mac,
+          category: 'Live Scanned Device',
+          brand: 'Nearby Device'
+        };
+
+        setDiscoveredDevices((prev) => {
+          if (prev.some((d) => d.name.toLowerCase() === dev.name.toLowerCase())) return prev;
+          return [newDeviceItem, ...prev];
+        });
+
+        if (selectedVehicle) {
+          handleAllocateDevice(selectedVehicle, dev.name, mac, dev.id);
+        }
+        showNotification(`Found & paired "${dev.name}" (MAC: ${mac}) via Bluetooth!`, 'success');
+      } else {
+        showNotification(res.error || 'Scan cancelled or device not selected.', 'error');
+      }
+    } finally {
+      setIsScanningBluetooth(false);
+    }
+  };
+
+  // Filtered devices list combining discovered + presets
+  const filteredDevicesList = useMemo(() => {
+    const query = deviceSearchQuery.toLowerCase().trim();
+    const combined = [...discoveredDevices, ...COMMON_CAR_BLUETOOTH_PRESETS];
+
+    // Deduplicate by name
+    const seen = new Set<string>();
+    const unique = combined.filter((item) => {
+      const lower = item.name.toLowerCase();
+      if (seen.has(lower)) return false;
+      seen.add(lower);
+      return true;
+    });
+
+    return unique.filter((item) => {
+      const matchesQuery =
+        !query ||
+        item.name.toLowerCase().includes(query) ||
+        item.brand.toLowerCase().includes(query) ||
+        item.category.toLowerCase().includes(query) ||
+        item.macAddress.toLowerCase().includes(query);
+
+      const matchesCat =
+        selectedDeviceCategory === 'All' || item.category === selectedDeviceCategory;
+
+      return matchesQuery && matchesCat;
+    });
+  }, [discoveredDevices, deviceSearchQuery, selectedDeviceCategory]);
+
+  // Save all settings and allocations
+  const handleSaveAndApply = () => {
+    const activeMap = mappings.find((m) => m.vehicleReg === selectedVehicle) || mappings[0];
+    const primaryVehicle = selectedVehicle || activeMap?.vehicleReg || localVehicles[0] || '';
+    const primaryDevice = activeMap?.deviceName || '';
+    const primaryMac = activeMap?.deviceMacAddress || '';
+
+    const newConfig: BluetoothConfig = {
+      enabled: true,
+      deviceName: primaryDevice,
+      deviceMacAddress: primaryMac,
+      vehicleReg: primaryVehicle,
+      defaultTripType: activeMap?.defaultTripType || 'work',
+      autoEndTrip: activeMap?.autoEndTrip ?? true,
+      vehicleMappings: mappings
+    };
+
+    onSaveConfig(newConfig);
+    showNotification(
+      `Saved Bluetooth allocations with MAC addresses for ${mappings.filter((m) => m.deviceName).length} vehicle(s)!`,
+      'success'
+    );
+    onClose();
+  };
 
   const ANDROID_SNIPPETS = {
     manifest: `<!-- AndroidManifest.xml -->
@@ -179,7 +523,12 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
 
   if (!isOpen) return null;
 
-  const currentUrls = generateAutomationUrls(undefined, selectedVehicle);
+  const currentUrls = generateAutomationUrls(
+    undefined,
+    selectedVehicle,
+    currentAllocation.deviceName,
+    currentAllocation.deviceMacAddress
+  );
 
   const copyToClipboard = (text: string, key: string) => {
     navigator.clipboard.writeText(text).then(() => {
@@ -190,7 +539,8 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
   };
 
   const handleDownloadTaskerProfile = () => {
-    const cleanDeviceName = deviceName.trim();
+    const cleanDeviceName = currentAllocation.deviceName.trim() || 'Car Bluetooth';
+    const cleanDeviceMac = currentAllocation.deviceMacAddress?.trim() || '';
     const safeStartUrl = currentUrls.startUrl.replace(/&/g, '&amp;');
     const safeEndUrl = currentUrls.endUrl.replace(/&/g, '&amp;');
     const xmlContent = `<?xml version="1.0" encoding="utf-8"?>
@@ -205,7 +555,7 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
   <State sr="con0" ve="2">
    <code>3</code>
    <Str sr="arg0" ve="3">${cleanDeviceName}</Str>
-   <Str sr="arg1" ve="3"/>
+   <Str sr="arg1" ve="3">${cleanDeviceMac}</Str>
   </State>
  </Profile>
  <Task sr="task9902">
@@ -242,17 +592,6 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
     showNotification('Downloaded EasyLog_Car_Bluetooth.prf.xml! In Tasker: tap Profiles > Import Profile.', 'success');
   };
 
-  const handleSaveAndApply = () => {
-    onSaveConfig({
-      enabled: true,
-      deviceName: deviceName.trim(),
-      vehicleReg: selectedVehicle,
-      defaultTripType,
-      autoEndTrip
-    });
-    showNotification('Car Bluetooth settings saved!', 'success');
-  };
-
   const handleBleConnect = async () => {
     setIsBleConnecting(true);
     const result = await connectBleBeacon(() => {
@@ -264,6 +603,9 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
 
     if (result.success) {
       setBleStatus(result.deviceName || 'Connected');
+      if (selectedVehicle) {
+        handleAllocateDevice(selectedVehicle, result.deviceName || 'BLE Car Beacon');
+      }
       showNotification(`Connected to ${result.deviceName}!`, 'success');
     } else {
       showNotification(result.error || 'Connection failed', 'error');
@@ -277,28 +619,28 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
   };
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-3 animate-fade-in">
-      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden max-h-[92vh] flex flex-col border border-gray-100">
-        
+    <div className="fixed inset-0 bg-black/65 backdrop-blur-xs z-50 flex items-center justify-center p-3 animate-fade-in">
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden max-h-[94vh] flex flex-col border border-gray-100">
         {/* Header */}
-        <div className="px-5 py-4 bg-gradient-to-r from-blue-600 via-indigo-600 to-indigo-700 text-white flex justify-between items-center shrink-0">
+        <div className="px-5 py-4 bg-gradient-to-r from-blue-600 via-indigo-600 to-indigo-800 text-white flex justify-between items-center shrink-0">
           <div className="flex items-center space-x-2.5">
             <div className="p-2 bg-white/15 backdrop-blur-md rounded-xl text-white">
               <Bluetooth size={22} className="animate-pulse" />
             </div>
             <div>
               <h2 className="text-base font-bold leading-tight">
-                Car Bluetooth Automation
+                Car Bluetooth Automation & Device Allocations
               </h2>
-              <p className="text-[11px] text-blue-100 flex items-center">
-                <Shield size={11} className="mr-1 text-emerald-300" />
-                Zero Passenger Tracking Guarantee
+              <p className="text-[11px] text-blue-100 flex items-center gap-1">
+                <Shield size={11} className="text-emerald-300" />
+                <span>Separate Bluetooth Devices Allocated Per Vehicle</span>
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
             className="p-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded-full transition"
+            aria-label="Close modal"
           >
             <X size={20} />
           </button>
@@ -306,137 +648,561 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
 
         {/* Scrollable Content */}
         <div className="p-5 space-y-5 overflow-y-auto text-xs text-gray-700">
-          
           {/* Benefit Explanation Banner */}
-          <div className="bg-emerald-50 border border-emerald-200/80 rounded-2xl p-3.5 space-y-2">
+          <div className="bg-emerald-50 border border-emerald-200/80 rounded-2xl p-3.5 space-y-1.5">
             <div className="flex items-start space-x-2.5">
               <div className="p-1.5 bg-emerald-600 text-white rounded-lg shrink-0 mt-0.5">
                 <UserX size={15} />
               </div>
-              <div className="space-y-1">
-                <div className="font-bold text-emerald-950 text-[13px]">
+              <div className="space-y-0.5">
+                <div className="font-bold text-emerald-950 text-xs">
                   Why Car Bluetooth Solves the "Passenger Problem"
                 </div>
                 <p className="text-emerald-800 text-[11px] leading-relaxed">
-                  When you travel as a passenger in an <strong>Uber, taxi, friend's car, or train</strong>, your phone does <strong>not</strong> connect to your car's Bluetooth. By tying GPS tracking exclusively to your vehicle's Bluetooth, trips are <strong>only recorded when you drive your own car</strong>.
+                  When you travel as a passenger in an <strong>Uber, taxi, friend's car, or public transit</strong>, your phone does <strong>not</strong> connect to your vehicle's Bluetooth. By allocating specific Bluetooth devices to each car, trips are <strong>only logged when driving your specific vehicle</strong>.
                 </p>
               </div>
             </div>
           </div>
 
-          {/* Car & Vehicle Profile Settings */}
-          <div className="bg-gray-50 border border-gray-200/80 rounded-2xl p-4 space-y-3">
-            <div className="font-bold text-gray-900 text-xs flex items-center justify-between">
-              <span className="flex items-center">
-                <Car size={14} className="mr-1.5 text-indigo-600" />
-                Your Vehicle & Bluetooth Pairing
+          {/* ========================================================================= */}
+          {/* STEP 1: Add New Registration Number Directly in Bluetooth Set-Up Screen */}
+          {/* ========================================================================= */}
+          <div className="bg-indigo-50/60 border border-indigo-200/80 rounded-2xl p-4 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-gray-900 text-xs flex items-center gap-1.5">
+                <Car size={15} className="text-indigo-600" />
+                <span>1. Add New Registration Number Directly</span>
               </span>
-              <span className="text-[10px] text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full font-semibold">
-                Auto-assigned
+              <span className="text-[10px] bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded-full font-bold">
+                Direct Fleet Setup
               </span>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-[11px] font-medium text-gray-600 mb-1">
-                  Car Bluetooth Name
-                </label>
+            <p className="text-[11px] text-gray-600">
+              Add a new car registration right here without leaving this screen. You can allocate its unique Bluetooth device immediately.
+            </p>
+
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 font-bold text-xs">
+                  🚗
+                </div>
                 <input
                   type="text"
-                  placeholder="e.g. Toyota BT, Mazda, CarPlay"
-                  value={deviceName}
-                  onChange={(e) => setDeviceName(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-gray-300 rounded-xl text-xs font-medium focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  placeholder="Enter Rego / License Plate (e.g. ABC-123, TESLA-M3)"
+                  value={newVehicleInput}
+                  onChange={(e) => setNewVehicleInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleAddNewVehicle()}
+                  className="w-full pl-9 pr-3 py-2 bg-white border border-indigo-200 rounded-xl text-xs font-mono font-bold uppercase focus:ring-2 focus:ring-indigo-500 focus:outline-none"
                 />
               </div>
+              <button
+                type="button"
+                onClick={handleAddNewVehicle}
+                disabled={!newVehicleInput.trim()}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition flex items-center gap-1 shadow-xs"
+              >
+                <Plus size={15} />
+                <span>Add Vehicle</span>
+              </button>
+            </div>
+          </div>
 
+          {/* ========================================================================= */}
+          {/* STEP 2: Separate Bluetooth Devices Allocated Per Vehicle Manager        */}
+          {/* ========================================================================= */}
+          <div className="bg-gray-50 border border-gray-200/90 rounded-2xl p-4 space-y-3">
+            <div className="flex items-center justify-between">
               <div>
-                <label className="block text-[11px] font-medium text-gray-600 mb-1">
-                  Log to Vehicle
-                </label>
-                <select
-                  value={selectedVehicle}
-                  onChange={(e) => setSelectedVehicle(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-gray-300 rounded-xl text-xs font-semibold uppercase focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                <h3 className="font-bold text-gray-900 text-xs flex items-center gap-1.5">
+                  <Sliders size={14} className="text-indigo-600" />
+                  <span>2. Vehicle Bluetooth Allocations ({localVehicles.length} vehicles)</span>
+                </h3>
+                <p className="text-[10.5px] text-gray-500 mt-0.5">
+                  Each vehicle has its own dedicated Bluetooth device. When that device connects, EasyLog starts tracking for that specific car.
+                </p>
+              </div>
+              <span className="text-[10px] text-indigo-700 font-semibold bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200/60">
+                1:1 Vehicle Pairing
+              </span>
+            </div>
+
+            {/* List of Vehicles & Allocated Devices */}
+            <div className="space-y-2.5">
+              {allVehicleAllocations.length === 0 ? (
+                <div className="p-4 bg-white rounded-xl border border-dashed border-gray-300 text-center text-gray-400 text-xs">
+                  No vehicles configured yet. Use the form above to add your first registration number.
+                </div>
+              ) : (
+                allVehicleAllocations.map((alloc) => {
+                  const isAllocated = Boolean(alloc.deviceName && alloc.deviceName.trim());
+                  const isCurrentlySelected = selectedVehicle === alloc.vehicleReg;
+
+                  // Check if another vehicle has the exact same device or MAC address allocated
+                  const duplicateMapping = isAllocated
+                    ? mappings.find(
+                        (m) =>
+                          m.vehicleReg !== alloc.vehicleReg &&
+                          m.deviceName &&
+                          ((m.deviceMacAddress && alloc.deviceMacAddress && normalizeMacAddress(m.deviceMacAddress) === normalizeMacAddress(alloc.deviceMacAddress)) ||
+                            m.deviceName.trim().toLowerCase() === alloc.deviceName.trim().toLowerCase())
+                      )
+                    : null;
+
+                  return (
+                    <div
+                      key={alloc.vehicleReg}
+                      className={`p-3.5 bg-white rounded-xl border transition shadow-2xs ${
+                        isCurrentlySelected
+                          ? 'border-indigo-400 ring-2 ring-indigo-500/15 bg-indigo-50/20'
+                          : 'border-gray-200 hover:border-gray-300'
+                      }`}
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                        {/* Vehicle & Allocated Device Info */}
+                        <div className="space-y-1.5 flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-mono font-bold bg-gray-900 text-white px-2 py-0.5 rounded-md tracking-wider">
+                              {alloc.vehicleReg}
+                            </span>
+                            {isCurrentlySelected && (
+                              <span className="text-[10px] bg-indigo-100 text-indigo-800 font-bold px-1.5 py-0.2 rounded">
+                                Selected Target
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                            <span className="text-gray-500 text-[11px]">Allocated Bluetooth:</span>
+                            {isAllocated ? (
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="font-semibold text-indigo-800 flex items-center gap-1 bg-indigo-50 px-2 py-0.5 rounded-lg border border-indigo-200/80">
+                                  <Bluetooth size={12} className="text-indigo-600" />
+                                  <span>{alloc.deviceName}</span>
+                                </span>
+                                <span
+                                  className="font-mono text-[10.5px] font-bold text-gray-700 bg-gray-100 px-2 py-0.5 rounded-lg border border-gray-200 flex items-center gap-1"
+                                  title="Unchanging Hardware MAC Address / Unique Identifier"
+                                >
+                                  <Cpu size={10} className="text-gray-500" />
+                                  <span>MAC: {alloc.deviceMacAddress || 'Not set'}</span>
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingMacVehicle(alloc.vehicleReg);
+                                    setEditingMacInput(alloc.deviceMacAddress || '');
+                                  }}
+                                  className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-0.5 hover:underline ml-0.5"
+                                  title="Edit MAC Address / Hardware Identifier"
+                                >
+                                  <Edit3 size={10} />
+                                  <span>Edit MAC</span>
+                                </button>
+                              </div>
+                            ) : (
+                              <span className="text-amber-700 font-medium bg-amber-50 px-2 py-0.5 rounded-lg border border-amber-200/60 flex items-center gap-1 text-[11px]">
+                                <AlertCircle size={11} className="text-amber-600" />
+                                <span>No device allocated</span>
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Quick Action Controls */}
+                        <div className="flex items-center gap-2 shrink-0">
+                          {/* Trip Type for this Vehicle */}
+                          <div className="flex bg-gray-100 rounded-lg p-0.5 border border-gray-200 text-[10.5px]">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleUpdateVehiclePreference(alloc.vehicleReg, { defaultTripType: 'work' })
+                              }
+                              className={`px-2 py-0.5 font-bold rounded-md transition ${
+                                alloc.defaultTripType === 'work'
+                                  ? 'bg-indigo-600 text-white shadow-2xs'
+                                  : 'text-gray-600 hover:text-gray-900'
+                              }`}
+                            >
+                              Work
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleUpdateVehiclePreference(alloc.vehicleReg, { defaultTripType: 'personal' })
+                              }
+                              className={`px-2 py-0.5 font-bold rounded-md transition ${
+                                alloc.defaultTripType === 'personal'
+                                  ? 'bg-emerald-600 text-white shadow-2xs'
+                                  : 'text-gray-600 hover:text-gray-900'
+                              }`}
+                            >
+                              Personal
+                            </button>
+                          </div>
+
+                          {/* Target this Vehicle button */}
+                          <button
+                            type="button"
+                            onClick={() => setSelectedVehicle(alloc.vehicleReg)}
+                            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1 ${
+                              isCurrentlySelected
+                                ? 'bg-indigo-600 text-white shadow-2xs'
+                                : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
+                            }`}
+                          >
+                            <span>{isCurrentlySelected ? 'Selected' : 'Select'}</span>
+                          </button>
+
+                          {/* Test Connect for this vehicle */}
+                          {isAllocated && (
+                            <button
+                              type="button"
+                              disabled={isTripActive}
+                              onClick={() => {
+                                onSimulateConnect(alloc.vehicleReg, alloc.deviceName, alloc.deviceMacAddress);
+                                onClose();
+                                showNotification(
+                                  `⚡ Simulated connect for ${alloc.vehicleReg} (${alloc.deviceName} • ${alloc.deviceMacAddress})!`,
+                                  'success'
+                                );
+                              }}
+                              className="p-1.5 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition"
+                              title={`Test Bluetooth connection for ${alloc.vehicleReg}`}
+                            >
+                              <Play size={12} className="fill-current" />
+                            </button>
+                          )}
+
+                          {/* Clear allocation button */}
+                          {isAllocated && (
+                            <button
+                              type="button"
+                              onClick={() => handleClearAllocation(alloc.vehicleReg)}
+                              className="p-1.5 text-gray-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
+                              title="Clear allocated device"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Inline MAC address editor for this vehicle */}
+                      {editingMacVehicle === alloc.vehicleReg && (
+                        <div className="mt-2.5 p-2.5 bg-indigo-50/80 rounded-xl border border-indigo-200 flex flex-col sm:flex-row gap-2 items-center text-xs animate-fade-in">
+                          <div className="flex items-center gap-1.5 flex-1 w-full">
+                            <span className="text-[11px] font-bold text-indigo-900 shrink-0">
+                              Hardware MAC:
+                            </span>
+                            <input
+                              type="text"
+                              placeholder="00:1A:7D:XX:YY:ZZ"
+                              value={editingMacInput}
+                              onChange={(e) => setEditingMacInput(formatMacAddressInput(e.target.value))}
+                              className="flex-1 px-2.5 py-1 bg-white border border-indigo-300 rounded-lg text-xs font-mono font-bold uppercase focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                            />
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0 w-full sm:w-auto justify-end">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditingMacInput(generateDeviceHardwareMac(alloc.deviceName || alloc.vehicleReg))
+                              }
+                              className="px-2.5 py-1 bg-white hover:bg-gray-50 text-indigo-700 border border-indigo-200 rounded-lg text-[10.5px] font-bold"
+                            >
+                              Generate MAC
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const clean = editingMacInput.trim()
+                                  ? normalizeMacAddress(editingMacInput)
+                                  : generateDeviceHardwareMac(alloc.deviceName);
+                                handleUpdateVehiclePreference(alloc.vehicleReg, {
+                                  deviceMacAddress: clean
+                                });
+                                setEditingMacVehicle(null);
+                                showNotification(`Updated MAC address to ${clean} for ${alloc.vehicleReg}!`, 'success');
+                              }}
+                              className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[10.5px] font-bold shadow-2xs"
+                            >
+                              Save MAC
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingMacVehicle(null)}
+                              className="px-2 py-1 text-gray-500 hover:text-gray-700 text-[10.5px]"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Warning if device is duplicated across multiple vehicles */}
+                      {duplicateMapping && (
+                        <div className="mt-2 text-[10.5px] bg-amber-50 text-amber-900 border border-amber-200/90 rounded-lg p-2 flex items-start gap-1.5">
+                          <AlertTriangle size={13} className="text-amber-600 shrink-0 mt-0.5" />
+                          <span>
+                            <strong>Duplicate Allocation:</strong> This Bluetooth device is also allocated to vehicle <strong>{duplicateMapping.vehicleReg}</strong>. Please allocate <strong>separate Bluetooth devices per vehicle</strong> so EasyLog can accurately distinguish which car you are driving.
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          {/* ========================================================================= */}
+          {/* STEP 3: Bluetooth Device Search List & Live Web Bluetooth Scanner       */}
+          {/* ========================================================================= */}
+          <div className="bg-gray-50 border border-gray-200/90 rounded-2xl p-4 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
+              <div>
+                <h3 className="font-bold text-gray-900 text-xs flex items-center gap-1.5">
+                  <Search size={14} className="text-indigo-600" />
+                  <span>3. Bluetooth Device Search List & Scanner</span>
+                </h3>
+                <p className="text-[10.5px] text-gray-500 mt-0.5">
+                  Allocating device to vehicle:{' '}
+                  <strong className="text-indigo-700 font-mono font-bold bg-indigo-50 px-1.5 py-0.2 rounded border border-indigo-200">
+                    {selectedVehicle || 'Select a vehicle above'}
+                  </strong>
+                </p>
+              </div>
+
+              {/* Live Web Bluetooth Scan Button */}
+              {isWebBluetoothSupported() ? (
+                <button
+                  type="button"
+                  onClick={handleScanWebBluetooth}
+                  disabled={isScanningBluetooth || !selectedVehicle}
+                  className="px-3 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-xs disabled:opacity-50 shrink-0"
                 >
-                  {vehicles.length === 0 && (
-                    <option value="">No vehicles added</option>
-                  )}
-                  {vehicles.map((v) => (
-                    <option key={v} value={v}>
-                      {v}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                  <RadioTower size={13} className={isScanningBluetooth ? 'animate-spin' : ''} />
+                  <span>{isScanningBluetooth ? 'Scanning...' : 'Scan Nearby Bluetooth'}</span>
+                </button>
+              ) : (
+                <span className="text-[10.5px] text-gray-400 italic">
+                  Search catalog or enter custom name below
+                </span>
+              )}
             </div>
 
-            <div className="grid grid-cols-2 gap-3 pt-1">
-              <div>
-                <label className="block text-[11px] font-medium text-gray-600 mb-1">
-                  Default Trip Purpose
-                </label>
-                <div className="flex bg-white rounded-xl p-0.5 border border-gray-200">
-                  <button
-                    type="button"
-                    onClick={() => setDefaultTripType('work')}
-                    className={`flex-1 py-1 text-[11px] font-semibold rounded-lg transition ${
-                      defaultTripType === 'work'
-                        ? 'bg-indigo-600 text-white shadow-sm'
-                        : 'text-gray-600 hover:text-gray-900'
-                    }`}
-                  >
-                    Work
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDefaultTripType('personal')}
-                    className={`flex-1 py-1 text-[11px] font-semibold rounded-lg transition ${
-                      defaultTripType === 'personal'
-                        ? 'bg-emerald-600 text-white shadow-sm'
-                        : 'text-gray-600 hover:text-gray-900'
-                    }`}
-                  >
-                    Personal
-                  </button>
-                </div>
-              </div>
+            {/* Search Input Bar */}
+            <div className="relative">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search Bluetooth devices or MAC address (e.g. Toyota, Tesla, Ford SYNC, CarPlay, 00:1A:7D)..."
+                value={deviceSearchQuery}
+                onChange={(e) => setDeviceSearchQuery(e.target.value)}
+                className="w-full pl-9 pr-3 py-2 bg-white border border-gray-300 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+              />
+              {deviceSearchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setDeviceSearchQuery('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  <X size={13} />
+                </button>
+              )}
+            </div>
 
-              <div>
-                <label className="block text-[11px] font-medium text-gray-600 mb-1">
-                  When Disconnected
-                </label>
-                <div className="flex items-center space-x-2 pt-1">
+            {/* Category Filter Pills */}
+            <div className="flex gap-1 overflow-x-auto pb-0.5 text-[10.5px]">
+              {['All', 'Factory Car Audio', 'Infotainment & Hands-Free', 'OBD-II & Diagnostics', 'Aftermarket Head Unit'].map((cat) => (
+                <button
+                  key={cat}
+                  type="button"
+                  onClick={() => setSelectedDeviceCategory(cat)}
+                  className={`px-2.5 py-1 rounded-lg font-semibold transition shrink-0 ${
+                    selectedDeviceCategory === cat
+                      ? 'bg-indigo-600 text-white shadow-2xs'
+                      : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
+                  }`}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+
+            {/* Filtered Search Results List */}
+            <div className="max-h-56 overflow-y-auto space-y-1.5 pr-0.5">
+              {filteredDevicesList.length === 0 ? (
+                <div className="p-4 bg-white rounded-xl border border-dashed border-gray-300 text-center text-gray-500 text-xs space-y-1">
+                  <p>No Bluetooth presets matched "{deviceSearchQuery}".</p>
+                  <p className="text-[11px] text-gray-400">
+                    You can enter a custom Bluetooth name and MAC address below.
+                  </p>
+                </div>
+              ) : (
+                filteredDevicesList.map((item) => {
+                  const isAllocatedToCurrent =
+                    currentAllocation.deviceName.toLowerCase() === item.name.toLowerCase() ||
+                    (currentAllocation.deviceMacAddress &&
+                      item.macAddress &&
+                      normalizeMacAddress(currentAllocation.deviceMacAddress) ===
+                        normalizeMacAddress(item.macAddress));
+
+                  // Check if allocated to ANOTHER vehicle in fleet
+                  const allocatedToOtherVehicle = mappings.find(
+                    (m) =>
+                      m.vehicleReg !== selectedVehicle &&
+                      m.deviceName &&
+                      ((m.deviceMacAddress &&
+                        item.macAddress &&
+                        normalizeMacAddress(m.deviceMacAddress) === normalizeMacAddress(item.macAddress)) ||
+                        m.deviceName.toLowerCase() === item.name.toLowerCase())
+                  );
+
+                  return (
+                    <div
+                      key={item.id || item.macAddress || item.name}
+                      className={`p-2.5 bg-white rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-2xs transition ${
+                        isAllocatedToCurrent
+                          ? 'border-indigo-400 bg-indigo-50/30'
+                          : allocatedToOtherVehicle
+                          ? 'border-amber-200 bg-amber-50/20'
+                          : 'border-gray-200 hover:border-indigo-200'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                        <div className="p-1.5 rounded-lg bg-blue-50 text-blue-600 shrink-0">
+                          <Bluetooth size={14} />
+                        </div>
+                        <div className="truncate flex-1">
+                          <div className="text-xs font-bold text-gray-900 truncate flex items-center gap-1.5">
+                            <span>{item.name}</span>
+                            {isAllocatedToCurrent && (
+                              <span className="text-[9.5px] bg-emerald-100 text-emerald-800 font-bold px-1.5 py-0.2 rounded">
+                                Active for {selectedVehicle}
+                              </span>
+                            )}
+                            {allocatedToOtherVehicle && !isAllocatedToCurrent && (
+                              <span className="text-[9.5px] bg-amber-100 text-amber-800 font-medium px-1.5 py-0.2 rounded">
+                                Paired to {allocatedToOtherVehicle.vehicleReg}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-gray-500 truncate flex items-center gap-2 mt-0.5">
+                            <span>{item.brand}</span>
+                            <span>•</span>
+                            <span className="text-indigo-600 font-medium">{item.category}</span>
+                            <span>•</span>
+                            <span className="font-mono font-bold text-gray-700 bg-gray-100 px-1 py-0.2 rounded border border-gray-200 text-[9.5px]">
+                              MAC: {item.macAddress}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0 justify-end">
+                        <button
+                          type="button"
+                          onClick={() => handleAllocateDevice(selectedVehicle, item.name, item.macAddress, item.id)}
+                          disabled={!selectedVehicle}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition shrink-0 ${
+                            isAllocatedToCurrent
+                              ? 'bg-emerald-600 text-white'
+                              : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200'
+                          }`}
+                        >
+                          {isAllocatedToCurrent ? 'Allocated' : `Allocate to ${selectedVehicle || 'Car'}`}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Custom Bluetooth Name & MAC Entry */}
+            <div className="pt-2.5 border-t border-gray-200 space-y-1.5">
+              <label className="block text-[11px] font-bold text-gray-700">
+                Or enter custom Bluetooth device name and unchanging MAC address:
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
                   <input
-                    type="checkbox"
-                    id="autoEndTripCheckbox"
-                    checked={autoEndTrip}
-                    onChange={(e) => setAutoEndTrip(e.target.checked)}
-                    className="rounded text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                    type="text"
+                    placeholder="Friendly Name (e.g. Work Van Audio, CarPlay)"
+                    value={customDeviceName}
+                    onChange={(e) => setCustomDeviceName(e.target.value)}
+                    className="w-full px-3 py-2 bg-white border border-gray-300 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none"
                   />
-                  <label htmlFor="autoEndTripCheckbox" className="text-[11px] text-gray-700 cursor-pointer">
-                    Auto-save immediately
-                  </label>
+                </div>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    placeholder="Hardware MAC (e.g. 00:1A:7D:55:22:99)"
+                    value={customDeviceMac}
+                    onChange={(e) => setCustomDeviceMac(formatMacAddressInput(e.target.value))}
+                    className="flex-1 px-3 py-2 bg-white border border-gray-300 rounded-xl text-xs font-mono font-bold uppercase focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCustomDeviceMac(
+                        generateDeviceHardwareMac(customDeviceName || selectedVehicle)
+                      )
+                    }
+                    className="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-200 rounded-xl text-[10.5px] font-bold shrink-0"
+                    title="Auto-generate standard hardware MAC address"
+                  >
+                    Gen MAC
+                  </button>
                 </div>
               </div>
+              <div className="flex justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (customDeviceName.trim()) {
+                      const finalMac = customDeviceMac.trim()
+                        ? normalizeMacAddress(customDeviceMac)
+                        : generateDeviceHardwareMac(customDeviceName);
+                      handleAllocateDevice(selectedVehicle, customDeviceName.trim(), finalMac);
+                      setCustomDeviceName('');
+                      setCustomDeviceMac('');
+                    }
+                  }}
+                  disabled={!customDeviceName.trim() || !selectedVehicle}
+                  className="px-4 py-2 bg-gray-900 hover:bg-black text-white rounded-xl text-xs font-bold transition disabled:opacity-50 flex items-center gap-1 shadow-xs"
+                >
+                  <Plus size={13} />
+                  <span>Allocate Custom Device to {selectedVehicle || 'Vehicle'}</span>
+                </button>
+              </div>
             </div>
+          </div>
 
+          {/* Master Save Button */}
+          <div className="pt-1">
             <button
               type="button"
               onClick={handleSaveAndApply}
-              className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl text-xs transition shadow-sm"
+              className="w-full py-3 bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-500 hover:to-indigo-600 text-white font-bold rounded-2xl text-xs transition shadow-md flex items-center justify-center gap-1.5"
             >
-              Save Bluetooth Preferences
+              <CheckCheck size={16} />
+              <span>Save & Apply All Vehicle Bluetooth Allocations</span>
             </button>
           </div>
 
-          {/* Setup Guide Tabs */}
-          <div className="space-y-3">
+          {/* ========================================================================= */}
+          {/* STEP 4: Automation Setup Guides (Play Store, Tasker, iOS, Samsung, BLE)   */}
+          {/* ========================================================================= */}
+          <div className="space-y-3 pt-2 border-t border-gray-200">
             <div className="flex items-center justify-between">
               <span className="font-bold text-gray-900 text-xs">
-                Setup Hands-Free Automation
+                Hands-Free Automation Platform Guides
               </span>
-              <span className="text-[10px] text-gray-400">100% Free & Automatic</span>
+              <span className="text-[10px] text-gray-400">Zero-Touch Automation</span>
             </div>
 
             {/* Platform Selector Tabs */}
@@ -469,9 +1235,7 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
                 type="button"
                 onClick={() => setActiveTab('ios')}
                 className={`flex-1 min-w-[70px] py-1.5 px-2 text-xs font-semibold rounded-lg transition ${
-                  activeTab === 'ios'
-                    ? 'bg-white text-gray-900 shadow-sm'
-                    : 'text-gray-500 hover:text-gray-800'
+                  activeTab === 'ios' ? 'bg-white text-gray-900 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-800'
                 }`}
               >
                  iPhone
@@ -480,9 +1244,7 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
                 type="button"
                 onClick={() => setActiveTab('android')}
                 className={`flex-1 min-w-[76px] py-1.5 px-2 text-xs font-semibold rounded-lg transition ${
-                  activeTab === 'android'
-                    ? 'bg-white text-gray-900 shadow-sm'
-                    : 'text-gray-500 hover:text-gray-800'
+                  activeTab === 'android' ? 'bg-white text-gray-900 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-800'
                 }`}
               >
                 🤖 Samsung
@@ -491,9 +1253,7 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
                 type="button"
                 onClick={() => setActiveTab('ble')}
                 className={`flex-1 min-w-[65px] py-1.5 px-2 text-xs font-semibold rounded-lg transition ${
-                  activeTab === 'ble'
-                    ? 'bg-white text-gray-900 shadow-sm'
-                    : 'text-gray-500 hover:text-gray-800'
+                  activeTab === 'ble' ? 'bg-white text-gray-900 shadow-sm font-bold' : 'text-gray-500 hover:text-gray-800'
                 }`}
               >
                 📡 BLE
@@ -516,32 +1276,29 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
                 <div className="bg-white rounded-xl p-3 border border-emerald-200 shadow-xs space-y-2">
                   <div className="font-semibold text-gray-900 text-[11px] flex items-center text-emerald-900">
                     <CheckCircle2 size={13} className="mr-1.5 text-emerald-600 shrink-0" />
-                    <span>Yes! 100% Built-In Android Bluetooth Detection</span>
+                    <span>Multi-Vehicle Android Bluetooth Detection Built-In</span>
                   </div>
                   <p className="text-gray-600 text-[10.5px]">
-                    Because EasyLog is distributed as a native Android app via the Google Play Store, <strong>Tasker is NOT needed</strong>. The app listens directly to Android OS system Bluetooth broadcasts:
+                    In the Android app, EasyLog listens directly to Android OS system Bluetooth broadcasts. When your car connects, it matches the device to the allocated vehicle:
                   </p>
-                  
+
                   <div className="grid grid-cols-1 gap-2 pt-1">
                     <div className="flex items-start space-x-2 bg-emerald-50/50 p-2 rounded-lg border border-emerald-100">
                       <span className="font-bold text-emerald-800 text-[11px]">1.</span>
                       <div>
                         <strong className="text-gray-900">Ignition On / Phone Connects:</strong>
-                        <p className="text-gray-600">Android OS fires <code className="text-emerald-700 bg-white px-1 py-0.5 rounded font-mono text-[9.5px]">ACTION_ACL_CONNECTED</code>. Our native BroadcastReceiver wakes up the app in your pocket.</p>
+                        <p className="text-gray-600">
+                          Android OS fires <code className="text-emerald-700 bg-white px-1 py-0.5 rounded font-mono text-[9.5px]">ACTION_ACL_CONNECTED</code>. Our native BroadcastReceiver wakes up and identifies which car was connected.
+                        </p>
                       </div>
                     </div>
                     <div className="flex items-start space-x-2 bg-emerald-50/50 p-2 rounded-lg border border-emerald-100">
                       <span className="font-bold text-emerald-800 text-[11px]">2.</span>
                       <div>
                         <strong className="text-gray-900">Autonomous GPS Foreground Service:</strong>
-                        <p className="text-gray-600">Starts low-power drive tracking and posts: <em>"🚗 EasyLog: Tracking Drive to {selectedVehicle || 'your car'}..."</em> (Complies 100% with Google Play Store policies).</p>
-                      </div>
-                    </div>
-                    <div className="flex items-start space-x-2 bg-emerald-50/50 p-2 rounded-lg border border-emerald-100">
-                      <span className="font-bold text-emerald-800 text-[11px]">3.</span>
-                      <div>
-                        <strong className="text-gray-900">Ignition Off / Disconnects:</strong>
-                        <p className="text-gray-600">Android OS fires <code className="text-emerald-700 bg-white px-1 py-0.5 rounded font-mono text-[9.5px]">ACTION_ACL_DISCONNECTED</code>. The drive automatically finalizes and posts a verification prompt.</p>
+                        <p className="text-gray-600">
+                          Starts low-power drive tracking and posts: <em>"🚗 EasyLog: Tracking Drive for {selectedVehicle || 'your car'}..."</em>
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -554,16 +1311,24 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
                     <span className="text-[10px] text-gray-400">Simulate OS event</span>
                   </div>
                   <p className="text-gray-600 text-[10.5px]">
-                    Test the exact Android event that <code className="text-gray-800 font-mono text-[10px]">CarBluetoothReceiver</code> triggers when your car connects:
+                    Simulate the exact Android event triggered when {selectedVehicle || 'your vehicle'} connects to {currentAllocation.deviceName || 'Bluetooth'}:
                   </p>
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
                       disabled={isTripActive}
                       onClick={() => {
-                        simulateNativeBluetoothEvent('connected', deviceName || 'Toyota Car BT', selectedVehicle);
+                        simulateNativeBluetoothEvent(
+                          'connected',
+                          currentAllocation.deviceName || 'Toyota Car BT',
+                          selectedVehicle,
+                          currentAllocation.deviceMacAddress
+                        );
                         onClose();
-                        showNotification(`🚗 Android OS Event: Car Connected (${selectedVehicle})`, 'success');
+                        showNotification(
+                          `🚗 Android OS Event: Connected to ${selectedVehicle} (${currentAllocation.deviceName || 'BT'} • ${currentAllocation.deviceMacAddress || 'MAC'})!`,
+                          'success'
+                        );
                       }}
                       className={`py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center space-x-1 transition ${
                         isTripActive
@@ -572,7 +1337,7 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
                       }`}
                     >
                       <Play size={12} className="fill-current" />
-                      <span>Simulate Connected</span>
+                      <span>Simulate Connect</span>
                     </button>
                     <button
                       type="button"
@@ -580,7 +1345,7 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
                       onClick={() => {
                         simulateNativeBluetoothEvent('disconnected');
                         onClose();
-                        showNotification('🛑 Android OS Event: Car Disconnected', 'success');
+                        showNotification('🛑 Android OS Event: Disconnected', 'success');
                       }}
                       className={`py-2 px-2.5 rounded-xl font-bold text-xs flex items-center justify-center space-x-1 transition ${
                         !isTripActive
@@ -589,7 +1354,7 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
                       }`}
                     >
                       <Square size={12} className="fill-current" />
-                      <span>Simulate Disconnected</span>
+                      <span>Simulate Disconnect</span>
                     </button>
                   </div>
                 </div>
@@ -598,512 +1363,272 @@ webView.evaluateJavascript("window.EasyLogNative.onBluetoothConnected('$carName'
                 <div className="bg-white rounded-xl p-3 border border-emerald-200 shadow-xs space-y-2">
                   <div className="flex items-center justify-between">
                     <div className="font-semibold text-gray-900 text-[11px] flex items-center">
-                      <FileCode size={13} className="mr-1 text-emerald-600" />
-                      <span>Play Store Native Android Source</span>
+                      <FileCode size={13} className="mr-1.5 text-emerald-700" />
+                      <span>Android Studio Source Code</span>
                     </div>
-                    <span className="text-[10px] text-emerald-600 font-medium">Ready in /android_native</span>
+                    <span className="text-[10px] text-gray-400">Play Store Production Architecture</span>
                   </div>
 
-                  {/* Code File Selector */}
-                  <div className="flex rounded-lg bg-gray-100 p-0.5 gap-0.5 text-[10px]">
+                  <div className="flex rounded-lg bg-gray-100 p-0.5 text-[10.5px]">
                     <button
                       type="button"
                       onClick={() => setSelectedCodeSnippet('receiver')}
-                      className={`flex-1 py-1 px-1.5 font-medium rounded transition ${
-                        selectedCodeSnippet === 'receiver' ? 'bg-white text-gray-900 font-semibold shadow-xs' : 'text-gray-500'
+                      className={`flex-1 py-1 rounded-md font-semibold transition ${
+                        selectedCodeSnippet === 'receiver' ? 'bg-white text-emerald-800 shadow-2xs font-bold' : 'text-gray-500'
                       }`}
                     >
-                      Receiver.kt
+                      CarBluetoothReceiver.kt
                     </button>
                     <button
                       type="button"
                       onClick={() => setSelectedCodeSnippet('manifest')}
-                      className={`flex-1 py-1 px-1.5 font-medium rounded transition ${
-                        selectedCodeSnippet === 'manifest' ? 'bg-white text-gray-900 font-semibold shadow-xs' : 'text-gray-500'
+                      className={`flex-1 py-1 rounded-md font-semibold transition ${
+                        selectedCodeSnippet === 'manifest' ? 'bg-white text-emerald-800 shadow-2xs font-bold' : 'text-gray-500'
                       }`}
                     >
-                      Manifest.xml
+                      AndroidManifest.xml
                     </button>
                     <button
                       type="button"
                       onClick={() => setSelectedCodeSnippet('service')}
-                      className={`flex-1 py-1 px-1.5 font-medium rounded transition ${
-                        selectedCodeSnippet === 'service' ? 'bg-white text-gray-900 font-semibold shadow-xs' : 'text-gray-500'
+                      className={`flex-1 py-1 rounded-md font-semibold transition ${
+                        selectedCodeSnippet === 'service' ? 'bg-white text-emerald-800 shadow-2xs font-bold' : 'text-gray-500'
                       }`}
                     >
-                      Service.kt
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedCodeSnippet('bridge')}
-                      className={`flex-1 py-1 px-1.5 font-medium rounded transition ${
-                        selectedCodeSnippet === 'bridge' ? 'bg-white text-gray-900 font-semibold shadow-xs' : 'text-gray-500'
-                      }`}
-                    >
-                      Bridge
+                      TrackingService.kt
                     </button>
                   </div>
 
-                  {/* Code snippet display */}
                   <div className="relative">
-                    <pre className="p-2.5 bg-gray-900 text-gray-200 text-[9.5px] font-mono rounded-lg overflow-x-auto max-h-36 select-all">
+                    <pre className="p-3 bg-gray-900 text-gray-100 font-mono text-[10px] rounded-xl overflow-x-auto max-h-40 border border-gray-800">
                       {ANDROID_SNIPPETS[selectedCodeSnippet]}
                     </pre>
+                    <div className="absolute top-2 right-2 flex gap-1">
+                      <button
+                        type="button"
+                        onClick={() => copyToClipboard(ANDROID_SNIPPETS[selectedCodeSnippet], 'code_' + selectedCodeSnippet)}
+                        className="p-1 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-[10px] flex items-center gap-1 px-1.5"
+                      >
+                        <Copy size={11} />
+                        <span>{copiedKey === 'code_' + selectedCodeSnippet ? 'Copied' : 'Copy'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleDownloadAndroidFile(
+                            selectedCodeSnippet === 'receiver'
+                              ? 'CarBluetoothReceiver.kt'
+                              : selectedCodeSnippet === 'manifest'
+                              ? 'AndroidManifest.xml'
+                              : 'EasyLogTrackingService.kt',
+                            ANDROID_SNIPPETS[selectedCodeSnippet]
+                          )
+                        }
+                        className="p-1 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-[10px] flex items-center gap-1 px-1.5"
+                      >
+                        <Download size={11} />
+                        <span>Download</span>
+                      </button>
+                    </div>
                   </div>
-
-                  <div className="flex gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const filename = selectedCodeSnippet === 'manifest' ? 'AndroidManifest.xml' :
-                          selectedCodeSnippet === 'receiver' ? 'CarBluetoothReceiver.kt' :
-                          selectedCodeSnippet === 'service' ? 'EasyLogTrackingService.kt' : 'MainActivity.kt';
-                        copyToClipboard(ANDROID_SNIPPETS[selectedCodeSnippet], 'code_' + selectedCodeSnippet);
-                      }}
-                      className="flex-1 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-800 font-semibold rounded-lg text-[10.5px] transition flex items-center justify-center space-x-1"
-                    >
-                      {copiedKey === 'code_' + selectedCodeSnippet ? <Check size={11} className="text-emerald-600" /> : <Copy size={11} />}
-                      <span>{copiedKey === 'code_' + selectedCodeSnippet ? 'Copied!' : 'Copy Code'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const filename = selectedCodeSnippet === 'manifest' ? 'AndroidManifest.xml' :
-                          selectedCodeSnippet === 'receiver' ? 'CarBluetoothReceiver.kt' :
-                          selectedCodeSnippet === 'service' ? 'EasyLogTrackingService.kt' : 'MainActivity.kt';
-                        handleDownloadAndroidFile(filename, ANDROID_SNIPPETS[selectedCodeSnippet]);
-                      }}
-                      className="py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg text-[10.5px] transition flex items-center justify-center space-x-1 shadow-xs"
-                    >
-                      <Download size={11} />
-                      <span>Download File</span>
-                    </button>
-                  </div>
-                </div>
-
-                <div className="text-[10px] text-emerald-800 bg-emerald-100/60 rounded-xl p-2.5 flex items-start space-x-1.5">
-                  <Info size={13} className="shrink-0 mt-0.5 text-emerald-700" />
-                  <span>
-                    All 4 native Android files are created and available inside the <code className="font-mono font-bold">/android_native/</code> folder of this project. You can copy them straight into Android Studio to compile your Play Store APK/AAB!
-                  </span>
                 </div>
               </div>
             )}
 
-            {/* TAB 0: Tasker (Pixel Pro / Android) */}
+            {/* TAB: Tasker */}
             {activeTab === 'tasker' && (
               <div className="bg-indigo-50/70 border border-indigo-200/80 rounded-2xl p-4 space-y-3.5 text-[11px] leading-relaxed animate-fade-in">
                 <div className="flex items-center justify-between">
                   <div className="font-bold text-indigo-950 text-xs flex items-center">
-                    <Zap size={15} className="mr-1.5 text-amber-500 fill-amber-500" />
-                    Tasker Setup (Pixel Pro & Android)
+                    <Zap size={14} className="mr-1.5 text-amber-500 fill-amber-500" />
+                    Tasker Automation for Android
                   </div>
-                  <span className="text-[10px] bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded-full font-semibold">
-                    Hands-Free
+                  <span className="text-[10px] bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded-full font-bold">
+                    For {selectedVehicle}
                   </span>
                 </div>
 
-                {/* 1-Click Profile Download Banner */}
                 <div className="bg-white rounded-xl p-3 border border-indigo-200 shadow-xs space-y-2">
-                  <div className="font-semibold text-gray-900 text-[11px] flex items-center justify-between">
-                    <span>⚡ Quick Import (Recommended)</span>
-                    <span className="text-[10px] text-indigo-600 font-normal">Pre-configured XML</span>
-                  </div>
+                  <span className="font-semibold text-gray-900 text-[11px]">Option A: 1-Click Tasker Import Profile</span>
                   <p className="text-gray-600 text-[10.5px]">
-                    Download the ready-to-import Tasker profile containing both the <strong>Start Drive</strong> and <strong>End Drive</strong> tasks for <strong>{selectedVehicle || 'your vehicle'}</strong>:
+                    Download the pre-configured profile for <strong>{selectedVehicle}</strong> and Bluetooth device <strong>{currentAllocation.deviceName || 'your car'}</strong>:
                   </p>
                   <button
                     type="button"
                     onClick={handleDownloadTaskerProfile}
-                    className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl text-xs transition flex items-center justify-center space-x-1.5 shadow-sm active:scale-98"
+                    className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-xs"
                   >
                     <Download size={13} />
-                    <span>Download Tasker Profile (.prf.xml)</span>
+                    <span>Download EasyLog_Car_Bluetooth.prf.xml</span>
                   </button>
-                  <div className="text-[10px] text-gray-500 bg-gray-50 rounded-lg p-2 border border-gray-100">
-                    <strong>To import in Tasker:</strong> Open Tasker → Long-press <strong>Profiles</strong> tab at the top (or tap 3 dots) → Tap <strong>Import Profile</strong> → Select the downloaded file. Tap the BT trigger to choose your car name!
-                  </div>
                 </div>
 
-                {/* Manual Setup Instructions */}
-                <div className="space-y-2 pt-1">
-                  <div className="font-bold text-gray-900 text-[11px]">
-                    Manual Step-by-Step in Tasker:
+                <div className="bg-white rounded-xl p-3 border border-indigo-200 shadow-xs space-y-2">
+                  <span className="font-semibold text-gray-900 text-[11px]">Option B: Webhook URLs</span>
+                  <div className="space-y-1.5">
+                    <div>
+                      <span className="text-[10px] text-gray-400 font-bold uppercase">Start Drive URL</span>
+                      <div className="flex gap-1 mt-0.5">
+                        <input
+                          type="text"
+                          readOnly
+                          value={currentUrls.startUrl}
+                          className="w-full bg-gray-50 border border-gray-200 px-2 py-1 rounded text-[10px] font-mono text-gray-700"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(currentUrls.startUrl, 'tasker_start')}
+                          className="px-2 bg-gray-100 hover:bg-gray-200 rounded text-[11px] font-semibold text-gray-700"
+                        >
+                          {copiedKey === 'tasker_start' ? 'Copied' : 'Copy'}
+                        </button>
+                      </div>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-gray-400 font-bold uppercase">End Drive URL</span>
+                      <div className="flex gap-1 mt-0.5">
+                        <input
+                          type="text"
+                          readOnly
+                          value={currentUrls.endUrl}
+                          className="w-full bg-gray-50 border border-gray-200 px-2 py-1 rounded text-[10px] font-mono text-gray-700"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(currentUrls.endUrl, 'tasker_end')}
+                          className="px-2 bg-gray-100 hover:bg-gray-200 rounded text-[11px] font-semibold text-gray-700"
+                        >
+                          {copiedKey === 'tasker_end' ? 'Copied' : 'Copy'}
+                        </button>
+                      </div>
+                    </div>
                   </div>
-
-                  <ol className="list-decimal pl-4 space-y-2 text-gray-700">
-                    <li>
-                      <strong>Create Profile:</strong> In Tasker, tap <strong>+ (New Profile)</strong> → Choose <strong>State</strong> → <strong>Net</strong> → <strong>BT Connected</strong>.
-                    </li>
-                    <li>
-                      Under <strong>Name</strong> or <strong>Address</strong>, tap the search icon 🔍 and select your <strong>Car's Bluetooth name</strong>. Tap the top-left <span className="font-mono font-bold">&lt;</span> back arrow.
-                    </li>
-                    <li>
-                      <strong>Enter Task (Start Drive):</strong> Tap <strong>+ New Task</strong> (name it <em>EasyLog Start</em>) → Tap <strong>+</strong> → <strong>Net</strong> → <strong>Browse URL</strong> → Paste the <strong>Start Trip URL</strong> below.
-                    </li>
-                    <li>
-                      <strong>Exit Task (End Drive):</strong> Long-press the green arrow next to your new profile in Tasker → Tap <strong>Add Exit Task</strong> → Name it <em>EasyLog End</em> → Tap <strong>+</strong> → <strong>Net</strong> → <strong>Browse URL</strong> → Paste the <strong>End Trip URL</strong> below.
-                    </li>
-                  </ol>
-                </div>
-
-                {/* Copyable Start Trip URL */}
-                <div className="space-y-1">
-                  <div className="flex justify-between items-center text-[10px] font-semibold text-gray-600 uppercase">
-                    <span>1. Tasker Start URL (Browse URL Action)</span>
-                    {copiedKey === 'start_tasker' && (
-                      <span className="text-emerald-600 font-bold flex items-center">
-                        <Check size={11} className="mr-0.5" /> Copied!
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center bg-white rounded-xl border border-indigo-200 overflow-hidden shadow-xs">
-                    <input
-                      type="text"
-                      readOnly
-                      value={currentUrls.startUrl}
-                      className="px-2.5 py-1.5 text-[10px] font-mono text-gray-700 bg-transparent flex-1 select-all outline-none truncate"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => copyToClipboard(currentUrls.startUrl, 'start_tasker')}
-                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-medium text-[11px] shrink-0 transition flex items-center"
-                    >
-                      <Copy size={12} className="mr-1" />
-                      Copy
-                    </button>
-                  </div>
-                </div>
-
-                {/* Copyable End Trip URL */}
-                <div className="space-y-1 pt-1">
-                  <div className="flex justify-between items-center text-[10px] font-semibold text-gray-600 uppercase">
-                    <span>2. Tasker End URL (Exit Task Browse URL)</span>
-                    {copiedKey === 'end_tasker' && (
-                      <span className="text-emerald-600 font-bold flex items-center">
-                        <Check size={11} className="mr-0.5" /> Copied!
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center bg-white rounded-xl border border-indigo-200 overflow-hidden shadow-xs">
-                    <input
-                      type="text"
-                      readOnly
-                      value={currentUrls.endUrl}
-                      className="px-2.5 py-1.5 text-[10px] font-mono text-gray-700 bg-transparent flex-1 select-all outline-none truncate"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => copyToClipboard(currentUrls.endUrl, 'end_tasker')}
-                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-medium text-[11px] shrink-0 transition flex items-center"
-                    >
-                      <Copy size={12} className="mr-1" />
-                      Copy
-                    </button>
-                  </div>
-                </div>
-
-                {/* Pixel Pro Specific Reliability Checklist */}
-                <div className="bg-amber-50/80 border border-amber-200/90 rounded-xl p-3 space-y-1.5">
-                  <div className="font-bold text-amber-950 text-[11px] flex items-center">
-                    <Smartphone size={13} className="mr-1 text-amber-700" />
-                    Crucial Settings for Pixel Pro:
-                  </div>
-                  <ul className="list-disc pl-4 space-y-1 text-amber-900 text-[10.5px]">
-                    <li>
-                      <strong>Battery:</strong> Go to Pixel <em>Settings → Apps → Tasker → App battery usage</em> → Set to <strong>Unrestricted</strong> (prevents Android Doze from killing Tasker).
-                    </li>
-                    <li>
-                      <strong>Display over other apps:</strong> Go to Pixel <em>Settings → Apps → Special app access → Display over other apps</em> → Set <strong>Tasker to Allowed</strong> so it can launch the browser while your phone is locked.
-                    </li>
-                    <li>
-                      <strong>Install as PWA:</strong> Tap the <em>Install App</em> button in EasyLog so it opens instantly in full screen standalone mode.
-                    </li>
-                  </ul>
                 </div>
               </div>
             )}
 
-            {/* TAB 1: iOS Shortcuts */}
+            {/* TAB: iOS Shortcuts */}
             {activeTab === 'ios' && (
-              <div className="bg-blue-50/60 border border-blue-100 rounded-2xl p-4 space-y-3 text-[11px] leading-relaxed animate-fade-in">
-                <div className="font-bold text-blue-900 text-xs flex items-center">
-                  <Smartphone size={14} className="mr-1.5 text-blue-600" />
-                  3-Minute iPhone Setup (Native & Hands-Free)
+              <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 space-y-3.5 text-[11px] leading-relaxed animate-fade-in">
+                <div className="font-bold text-gray-900 text-xs flex items-center justify-between">
+                  <span>Apple Shortcuts Automation (iOS)</span>
+                  <span className="text-[10px] bg-gray-200 text-gray-700 px-2 py-0.5 rounded-full font-bold">
+                    Target: {selectedVehicle}
+                  </span>
                 </div>
 
-                <ol className="list-decimal pl-4 space-y-2 text-gray-700">
-                  <li>
-                    Open the built-in <strong>Shortcuts</strong> app on your iPhone.
-                  </li>
-                  <li>
-                    Tap the <strong>Automation</strong> tab at the bottom, then tap <strong>+ (New Automation)</strong>.
-                  </li>
-                  <li>
-                    Select <strong>Bluetooth</strong> → Choose your <strong>Car's Bluetooth Device</strong>. Select <em>"Run Immediately"</em> (turn off Ask Before Running).
-                  </li>
-                  <li>
-                    Choose action: <strong>Open URLs</strong> → Paste the <strong>Start Trip Link</strong> below:
-                  </li>
-                </ol>
+                <div className="bg-white rounded-xl p-3 border border-gray-200 shadow-xs space-y-2">
+                  <ol className="list-decimal list-inside space-y-1.5 text-gray-700">
+                    <li>Open the <strong>Shortcuts</strong> app on your iPhone.</li>
+                    <li>Tap the <strong>Automation</strong> tab at the bottom, then <strong>+</strong> (New Automation).</li>
+                    <li>Choose <strong>Bluetooth</strong> → Select <strong>{currentAllocation.deviceName || "your car's Bluetooth"}</strong>.</li>
+                    <li>Select <em>"Run Immediately"</em> (turn off Ask Before Running).</li>
+                    <li>Action: Add <strong>Open URL</strong> and paste the start URL below:</li>
+                  </ol>
 
-                {/* Copyable Start Trip URL */}
-                <div className="space-y-1">
-                  <div className="flex justify-between items-center text-[10px] font-semibold text-gray-500 uppercase">
-                    <span>1. Start Trip Automation URL</span>
-                    {copiedKey === 'start' && (
-                      <span className="text-emerald-600 font-bold flex items-center">
-                        <Check size={11} className="mr-0.5" /> Copied!
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center bg-white rounded-xl border border-blue-200 overflow-hidden shadow-xs">
+                  <div className="flex gap-1 pt-1">
                     <input
                       type="text"
                       readOnly
                       value={currentUrls.startUrl}
-                      className="px-2.5 py-1.5 text-[10px] font-mono text-gray-700 bg-transparent flex-1 select-all outline-none truncate"
+                      className="w-full bg-gray-50 border border-gray-200 px-2 py-1.5 rounded-lg text-[10px] font-mono text-gray-700"
                     />
                     <button
                       type="button"
-                      onClick={() => copyToClipboard(currentUrls.startUrl, 'start')}
-                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-medium text-[11px] shrink-0 transition flex items-center"
+                      onClick={() => copyToClipboard(currentUrls.startUrl, 'ios_start')}
+                      className="px-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold"
                     >
-                      <Copy size={12} className="mr-1" />
-                      Copy
+                      {copiedKey === 'ios_start' ? 'Copied' : 'Copy'}
                     </button>
                   </div>
-                </div>
-
-                {/* Copyable End Trip URL */}
-                <div className="space-y-1 pt-1">
-                  <div className="flex justify-between items-center text-[10px] font-semibold text-gray-500 uppercase">
-                    <span>2. End Trip Automation URL (On Disconnect)</span>
-                    {copiedKey === 'end' && (
-                      <span className="text-emerald-600 font-bold flex items-center">
-                        <Check size={11} className="mr-0.5" /> Copied!
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center bg-white rounded-xl border border-blue-200 overflow-hidden shadow-xs">
-                    <input
-                      type="text"
-                      readOnly
-                      value={currentUrls.endUrl}
-                      className="px-2.5 py-1.5 text-[10px] font-mono text-gray-700 bg-transparent flex-1 select-all outline-none truncate"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => copyToClipboard(currentUrls.endUrl, 'end')}
-                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-medium text-[11px] shrink-0 transition flex items-center"
-                    >
-                      <Copy size={12} className="mr-1" />
-                      Copy
-                    </button>
-                  </div>
-                </div>
-
-                <div className="text-[10px] text-gray-500 bg-white/70 rounded-lg p-2 border border-blue-100">
-                  💡 <em>Whenever your iPhone connects to your car stereo, your trip starts in the background and rings a sound chime. When you park and turn off the engine, the trip automatically ends!</em>
                 </div>
               </div>
             )}
 
-            {/* TAB 2: Android Routines */}
+            {/* TAB: Samsung Routines */}
             {activeTab === 'android' && (
-              <div className="bg-purple-50/60 border border-purple-100 rounded-2xl p-4 space-y-3 text-[11px] leading-relaxed animate-fade-in">
-                <div className="font-bold text-purple-900 text-xs flex items-center">
-                  <Smartphone size={14} className="mr-1.5 text-purple-600" />
-                  Android Modes & Routines / Tasker Setup
+              <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 space-y-3.5 text-[11px] leading-relaxed animate-fade-in">
+                <div className="font-bold text-gray-900 text-xs flex items-center justify-between">
+                  <span>Samsung Modes & Routines</span>
+                  <span className="text-[10px] bg-gray-200 text-gray-700 px-2 py-0.5 rounded-full font-bold">
+                    Galaxy Devices
+                  </span>
                 </div>
 
-                <ol className="list-decimal pl-4 space-y-2 text-gray-700">
-                  <li>
-                    On Samsung: Open <strong>Settings → Modes and Routines → Routines (+)</strong>.<br />
-                    On Pixel/Other: Use <strong>Tasker</strong> or <strong>Macrodroid</strong>.
-                  </li>
-                  <li>
-                    <strong>If:</strong> Connected to Bluetooth device → Select your <strong>Car Audio</strong>.
-                  </li>
-                  <li>
-                    <strong>Then:</strong> Open Web Link / Open Chrome URL → Paste the <strong>Start Trip Link</strong>.
-                  </li>
-                  <li>
-                    Add an exit action or second routine for <em>Disconnected</em> → Paste the <strong>End Trip Link</strong>.
-                  </li>
-                </ol>
+                <div className="bg-white rounded-xl p-3 border border-gray-200 shadow-xs space-y-2">
+                  <ol className="list-decimal list-inside space-y-1.5 text-gray-700">
+                    <li>Open <strong>Settings</strong> &gt; <strong>Modes and Routines</strong> &gt; <strong>Routines</strong>.</li>
+                    <li><strong>If:</strong> Connected to Bluetooth device &gt; Select <strong>{currentAllocation.deviceName || "your car audio"}</strong>.</li>
+                    <li><strong>Then:</strong> Open website URL &gt; Paste the start URL below:</li>
+                  </ol>
 
-                {/* Copyable Start Trip URL */}
-                <div className="space-y-1">
-                  <div className="flex justify-between items-center text-[10px] font-semibold text-gray-500 uppercase">
-                    <span>1. Start Trip Routine URL</span>
-                    {copiedKey === 'start_android' && (
-                      <span className="text-emerald-600 font-bold flex items-center">
-                        <Check size={11} className="mr-0.5" /> Copied!
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center bg-white rounded-xl border border-purple-200 overflow-hidden shadow-xs">
+                  <div className="flex gap-1 pt-1">
                     <input
                       type="text"
                       readOnly
                       value={currentUrls.startUrl}
-                      className="px-2.5 py-1.5 text-[10px] font-mono text-gray-700 bg-transparent flex-1 select-all outline-none truncate"
+                      className="w-full bg-gray-50 border border-gray-200 px-2 py-1.5 rounded-lg text-[10px] font-mono text-gray-700"
                     />
                     <button
                       type="button"
-                      onClick={() => copyToClipboard(currentUrls.startUrl, 'start_android')}
-                      className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white font-medium text-[11px] shrink-0 transition flex items-center"
+                      onClick={() => copyToClipboard(currentUrls.startUrl, 'samsung_start')}
+                      className="px-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold"
                     >
-                      <Copy size={12} className="mr-1" />
-                      Copy
-                    </button>
-                  </div>
-                </div>
-
-                {/* Copyable End Trip URL */}
-                <div className="space-y-1 pt-1">
-                  <div className="flex justify-between items-center text-[10px] font-semibold text-gray-500 uppercase">
-                    <span>2. End Trip Routine URL</span>
-                    {copiedKey === 'end_android' && (
-                      <span className="text-emerald-600 font-bold flex items-center">
-                        <Check size={11} className="mr-0.5" /> Copied!
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center bg-white rounded-xl border border-purple-200 overflow-hidden shadow-xs">
-                    <input
-                      type="text"
-                      readOnly
-                      value={currentUrls.endUrl}
-                      className="px-2.5 py-1.5 text-[10px] font-mono text-gray-700 bg-transparent flex-1 select-all outline-none truncate"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => copyToClipboard(currentUrls.endUrl, 'end_android')}
-                      className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white font-medium text-[11px] shrink-0 transition flex items-center"
-                    >
-                      <Copy size={12} className="mr-1" />
-                      Copy
+                      {copiedKey === 'samsung_start' ? 'Copied' : 'Copy'}
                     </button>
                   </div>
                 </div>
               </div>
             )}
 
-            {/* TAB 3: BLE Dongle */}
+            {/* TAB: BLE Beacon */}
             {activeTab === 'ble' && (
-              <div className="bg-amber-50/60 border border-amber-100 rounded-2xl p-4 space-y-3 text-[11px] leading-relaxed animate-fade-in">
-                <div className="font-bold text-amber-900 text-xs flex items-center">
-                  <Radio size={14} className="mr-1.5 text-amber-600" />
-                  Bluetooth Low Energy (BLE) Beacon / OBD-II Scanner
+              <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 space-y-3.5 text-[11px] leading-relaxed animate-fade-in">
+                <div className="font-bold text-gray-900 text-xs flex items-center justify-between">
+                  <span>Bluetooth Low Energy (BLE) Beacon / OBD-II Scanner</span>
+                  <span className="text-[10px] bg-gray-200 text-gray-700 px-2 py-0.5 rounded-full font-bold">
+                    In-Browser BLE
+                  </span>
                 </div>
 
-                <p className="text-gray-700 leading-normal">
-                  If you keep an OBD-II BLE dongle or Bluetooth beacon in your car, you can pair it directly inside this web browser using the <strong>Web Bluetooth API</strong>. When the beacon powers off with the car, the app senses the disconnect and ends the trip.
+                <p className="text-gray-600">
+                  If you keep an OBD-II BLE dongle (e.g. Veepeak, OBDLink) in your car, you can pair it directly inside this browser. When the car ignition turns off, the beacon disconnects and stops the trip.
                 </p>
 
-                <div className="bg-white rounded-xl p-3 border border-amber-200 space-y-2">
+                <div className="bg-white rounded-xl p-3 border border-gray-200 shadow-xs space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-semibold text-gray-700">Beacon Status:</span>
-                    {bleStatus ? (
-                      <span className="text-emerald-700 font-bold flex items-center">
-                        <span className="h-2 w-2 rounded-full bg-emerald-500 animate-ping mr-1.5"></span>
-                        Connected: {bleStatus}
-                      </span>
-                    ) : (
-                      <span className="text-gray-400">Not Paired</span>
-                    )}
+                    <span className="text-gray-500">Status:</span>
+                    <span className={`font-semibold ${bleStatus ? 'text-emerald-700' : 'text-gray-500'}`}>
+                      {bleStatus ? `Connected to ${bleStatus}` : 'Disconnected'}
+                    </span>
                   </div>
 
-                  {bleStatus ? (
-                    <button
-                      type="button"
-                      onClick={handleBleDisconnect}
-                      className="w-full py-2 bg-red-50 text-red-600 hover:bg-red-100 font-semibold rounded-xl text-xs transition border border-red-200"
-                    >
-                      Disconnect BLE Beacon
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      disabled={isBleConnecting}
-                      onClick={handleBleConnect}
-                      className="w-full py-2 bg-amber-600 hover:bg-amber-700 text-white font-semibold rounded-xl text-xs transition shadow-xs flex items-center justify-center space-x-1.5"
-                    >
-                      <Bluetooth size={14} />
-                      <span>{isBleConnecting ? 'Scanning...' : 'Pair BLE Car Accessory'}</span>
-                    </button>
-                  )}
+                  <div className="pt-1">
+                    {bleStatus ? (
+                      <button
+                        type="button"
+                        onClick={handleBleDisconnect}
+                        className="w-full py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl text-xs transition"
+                      >
+                        Disconnect BLE Beacon
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleBleConnect}
+                        disabled={isBleConnecting}
+                        className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs transition disabled:opacity-50 flex items-center justify-center gap-1.5"
+                      >
+                        <Radio size={13} />
+                        <span>{isBleConnecting ? 'Pairing...' : 'Pair BLE Dongle / Beacon'}</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
           </div>
-
-          {/* Test & Simulation Sandbox */}
-          <div className="bg-gray-900 text-white rounded-2xl p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="font-bold text-xs flex items-center text-indigo-300">
-                <Sparkles size={14} className="mr-1.5 text-indigo-400" />
-                Live Bluetooth Simulation
-              </span>
-              <span className="text-[10px] text-gray-400">Test right in your browser</span>
-            </div>
-
-            <p className="text-[11px] text-gray-300">
-              Try out how the app responds when your car connects or disconnects:
-            </p>
-
-            <div className="grid grid-cols-2 gap-2.5">
-              <button
-                type="button"
-                disabled={isTripActive}
-                onClick={() => {
-                  onSimulateConnect();
-                  onClose();
-                }}
-                className={`py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center space-x-1.5 transition ${
-                  isTripActive
-                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                    : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-md active:scale-95'
-                }`}
-              >
-                <Play size={14} className="fill-current" />
-                <span>Simulate Connect</span>
-              </button>
-
-              <button
-                type="button"
-                disabled={!isTripActive}
-                onClick={() => {
-                  onSimulateDisconnect();
-                  onClose();
-                }}
-                className={`py-2.5 px-3 rounded-xl font-bold text-xs flex items-center justify-center space-x-1.5 transition ${
-                  !isTripActive
-                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                    : 'bg-rose-600 hover:bg-rose-500 text-white shadow-md active:scale-95'
-                }`}
-              >
-                <Square size={14} className="fill-current" />
-                <span>Simulate Disconnect</span>
-              </button>
-            </div>
-          </div>
-
         </div>
-
-        {/* Footer */}
-        <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 flex justify-end shrink-0">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-5 py-2 bg-gray-900 hover:bg-gray-800 text-white rounded-xl text-xs font-semibold transition"
-          >
-            Done
-          </button>
-        </div>
-
       </div>
     </div>
   );

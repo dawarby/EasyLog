@@ -44,12 +44,22 @@ import {
   Clock,
   FileCheck,
   Gauge,
-  Home
+  Home,
+  ShieldAlert,
+  HelpCircle,
+  ChevronUp
 } from 'lucide-react';
 import { Backup, BluetoothConfig } from '../types';
 import { PWAInstallButton } from './PWAInstallButton';
 import { HomeWorkLocationSettings } from './HomeWorkLocationSettings';
 import { isWebBluetoothSupported } from '../services/bluetoothService';
+import {
+  queryAllPermissions,
+  requestCameraPermission,
+  requestLocationPermission,
+  getPermissionHelpGuide,
+  DevicePermissionsState
+} from '../services/devicePermissionsService';
 import {
   getNotificationStatus,
   getNotificationPreferences,
@@ -258,6 +268,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   }, []);
 
+  const [devicePermissions, setDevicePermissions] = useState<DevicePermissionsState | null>(null);
+  const [permissionTesting, setPermissionTesting] = useState<'camera' | 'location' | 'notifications' | null>(null);
+  const [showPermissionsGuide, setShowPermissionsGuide] = useState<boolean>(false);
+  const [activeGuideType, setActiveGuideType] = useState<'camera' | 'location' | 'notifications'>('camera');
+
+  const refreshPermissionsState = async () => {
+    try {
+      const state = await queryAllPermissions();
+      setDevicePermissions(state);
+    } catch (e) {
+      console.warn('Failed to query device permissions:', e);
+    }
+  };
+
   useEffect(() => {
     if (isOpen) {
       setActiveWorkflowTab(initialTab);
@@ -265,8 +289,61 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setIsRestoreConfirming(false);
       setNewVehicle('');
       setEditingVehicleId(null);
+      refreshPermissionsState();
     }
   }, [isOpen, initialTab]);
+
+  const handleTestCameraPermission = async () => {
+    setPermissionTesting('camera');
+    try {
+      const res = await requestCameraPermission();
+      await refreshPermissionsState();
+      if (res.granted) {
+        showNotification?.('Camera permission granted! Ready for dashboard calibration and scanning.', 'success');
+      } else {
+        showNotification?.(res.error || 'Camera permission denied. Please allow camera in phone settings.', 'error');
+        setActiveGuideType('camera');
+        setShowPermissionsGuide(true);
+      }
+    } finally {
+      setPermissionTesting(null);
+    }
+  };
+
+  const handleTestLocationPermission = async () => {
+    setPermissionTesting('location');
+    try {
+      const res = await requestLocationPermission();
+      await refreshPermissionsState();
+      if (res.granted) {
+        showNotification?.('GPS Location permission granted! Automatic trip tracking is active.', 'success');
+      } else {
+        showNotification?.(res.error || 'Location permission denied. Please enable GPS in phone settings.', 'error');
+        setActiveGuideType('location');
+        setShowPermissionsGuide(true);
+      }
+    } finally {
+      setPermissionTesting(null);
+    }
+  };
+
+  const handleTestNotificationPermission = async () => {
+    setPermissionTesting('notifications');
+    try {
+      const granted = await requestNotificationPermission();
+      await refreshPermissionsState();
+      setNotificationStatus(getNotificationStatus());
+      if (granted) {
+        showNotification?.('Notifications enabled! You will receive background drive alerts.', 'success');
+      } else {
+        showNotification?.('Notifications permission was not granted.', 'error');
+        setActiveGuideType('notifications');
+        setShowPermissionsGuide(true);
+      }
+    } finally {
+      setPermissionTesting(null);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -726,6 +803,225 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               </div>
 
+              {/* App Permissions & Standalone Diagnostics Card */}
+              <div className="bg-gray-50 border border-gray-200/90 rounded-2xl p-4 space-y-3.5">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <h3 className="font-bold text-gray-900 text-xs flex items-center gap-1.5">
+                      <ShieldAlert size={15} className="text-indigo-600" />
+                      <span>Device Permissions & Freestanding App Status</span>
+                    </h3>
+                    <p className="text-[11px] text-gray-500 mt-0.5">
+                      Verify camera, GPS location, and background alerts for standalone app use
+                    </p>
+                  </div>
+                  <span
+                    className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${
+                      devicePermissions?.isStandalone
+                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                        : 'bg-gray-200 text-gray-700'
+                    }`}
+                  >
+                    {devicePermissions?.isStandalone ? '✓ Standalone App' : 'Browser Mode'}
+                  </span>
+                </div>
+
+                {/* Permissions List */}
+                <div className="space-y-2">
+                  {/* 1. Camera */}
+                  <div className="flex items-center justify-between bg-white border border-gray-200 p-2.5 rounded-xl shadow-2xs">
+                    <div className="flex items-center gap-2.5 min-w-0 pr-2">
+                      <div className="p-1.5 rounded-lg bg-indigo-50 text-indigo-600 shrink-0">
+                        <Camera size={15} />
+                      </div>
+                      <div className="truncate">
+                        <div className="text-xs font-semibold text-gray-900 truncate">
+                          Camera Access
+                        </div>
+                        <div className="text-[10px] text-gray-500 truncate">
+                          Dashboard photos & calibration sync
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span
+                        className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${
+                          devicePermissions?.camera === 'granted'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-amber-100 text-amber-800'
+                        }`}
+                      >
+                        {devicePermissions?.camera === 'granted' ? 'Granted' : 'Needs Access'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleTestCameraPermission}
+                        disabled={permissionTesting === 'camera'}
+                        className="text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold px-2.5 py-1 rounded-lg border border-indigo-200 transition disabled:opacity-50"
+                      >
+                        {permissionTesting === 'camera' ? 'Testing...' : 'Test & Grant'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 2. GPS Location */}
+                  <div className="flex items-center justify-between bg-white border border-gray-200 p-2.5 rounded-xl shadow-2xs">
+                    <div className="flex items-center gap-2.5 min-w-0 pr-2">
+                      <div className="p-1.5 rounded-lg bg-emerald-50 text-emerald-600 shrink-0">
+                        <Navigation size={15} />
+                      </div>
+                      <div className="truncate">
+                        <div className="text-xs font-semibold text-gray-900 truncate">
+                          Location (GPS)
+                        </div>
+                        <div className="text-[10px] text-gray-500 truncate">
+                          Real-time mileage & street addresses
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span
+                        className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${
+                          devicePermissions?.location === 'granted'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-amber-100 text-amber-800'
+                        }`}
+                      >
+                        {devicePermissions?.location === 'granted' ? 'Granted' : 'Needs Access'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleTestLocationPermission}
+                        disabled={permissionTesting === 'location'}
+                        className="text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold px-2.5 py-1 rounded-lg border border-emerald-200 transition disabled:opacity-50"
+                      >
+                        {permissionTesting === 'location' ? 'Testing...' : 'Test & Grant'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 3. Notifications */}
+                  <div className="flex items-center justify-between bg-white border border-gray-200 p-2.5 rounded-xl shadow-2xs">
+                    <div className="flex items-center gap-2.5 min-w-0 pr-2">
+                      <div className="p-1.5 rounded-lg bg-indigo-50 text-indigo-600 shrink-0">
+                        <Bell size={15} />
+                      </div>
+                      <div className="truncate">
+                        <div className="text-xs font-semibold text-gray-900 truncate">
+                          Drive Notifications
+                        </div>
+                        <div className="text-[10px] text-gray-500 truncate">
+                          Bluetooth connect alerts & reminders
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span
+                        className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${
+                          devicePermissions?.notifications === 'granted'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-gray-100 text-gray-600'
+                        }`}
+                      >
+                        {devicePermissions?.notifications === 'granted' ? 'Enabled' : 'Disabled'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleTestNotificationPermission}
+                        disabled={permissionTesting === 'notifications'}
+                        className="text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold px-2.5 py-1 rounded-lg border border-indigo-200 transition disabled:opacity-50"
+                      >
+                        {permissionTesting === 'notifications' ? 'Requesting...' : 'Enable'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 4. Wake Lock */}
+                  <div className="flex items-center justify-between bg-white border border-gray-200 p-2.5 rounded-xl shadow-2xs">
+                    <div className="flex items-center gap-2.5 min-w-0 pr-2">
+                      <div className="p-1.5 rounded-lg bg-amber-50 text-amber-600 shrink-0">
+                        <Sun size={15} />
+                      </div>
+                      <div className="truncate">
+                        <div className="text-xs font-semibold text-gray-900 truncate">
+                          Screen Wake Lock
+                        </div>
+                        <div className="text-[10px] text-gray-500 truncate">
+                          Prevents phone screen sleeping while driving
+                        </div>
+                      </div>
+                    </div>
+
+                    <span className="text-[10.5px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 shrink-0">
+                      Active
+                    </span>
+                  </div>
+                </div>
+
+                {/* Permissions Troubleshooting Toggle */}
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowPermissionsGuide(!showPermissionsGuide)}
+                    className="w-full flex items-center justify-between text-xs text-indigo-700 hover:text-indigo-900 font-bold py-1 px-1 transition"
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <HelpCircle size={14} />
+                      <span>Permission Troubleshooting Guide (iPhone & Android)</span>
+                    </span>
+                    {showPermissionsGuide ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                  </button>
+
+                  {showPermissionsGuide && (
+                    <div className="mt-2 p-3 bg-white rounded-xl border border-gray-200 space-y-2.5 text-xs animate-fade-in">
+                      <div className="flex gap-1.5 p-1 bg-gray-100 rounded-lg">
+                        <button
+                          type="button"
+                          onClick={() => setActiveGuideType('camera')}
+                          className={`flex-1 py-1 rounded-md text-[11px] font-bold transition ${
+                            activeGuideType === 'camera' ? 'bg-white text-indigo-700 shadow-2xs' : 'text-gray-600'
+                          }`}
+                        >
+                          Camera
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setActiveGuideType('location')}
+                          className={`flex-1 py-1 rounded-md text-[11px] font-bold transition ${
+                            activeGuideType === 'location' ? 'bg-white text-indigo-700 shadow-2xs' : 'text-gray-600'
+                          }`}
+                        >
+                          Location
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setActiveGuideType('notifications')}
+                          className={`flex-1 py-1 rounded-md text-[11px] font-bold transition ${
+                            activeGuideType === 'notifications' ? 'bg-white text-indigo-700 shadow-2xs' : 'text-gray-600'
+                          }`}
+                        >
+                          Notifications
+                        </button>
+                      </div>
+
+                      <div className="text-[11.5px] text-gray-700 space-y-1.5">
+                        <div className="font-bold text-gray-900">
+                          {getPermissionHelpGuide(activeGuideType).title}
+                        </div>
+                        <ol className="list-decimal list-inside space-y-1 text-gray-600 pl-1 leading-relaxed">
+                          {getPermissionHelpGuide(activeGuideType).steps.map((step, idx) => (
+                            <li key={idx}>{step}</li>
+                          ))}
+                        </ol>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
               {/* Next step teaser */}
               <div className="flex justify-end pt-1">
                 <button
@@ -883,18 +1179,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </p>
 
                 {/* Device Status Box */}
-                <div className="bg-white rounded-xl p-3 border border-blue-100 flex items-center justify-between">
-                  <div>
+                <div className="bg-white rounded-xl p-3 border border-blue-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="space-y-1">
                     <span className="text-[10px] uppercase font-bold text-gray-400 block">
-                      Target Car Bluetooth
+                      Target Car Bluetooth & Allocated Vehicles
                     </span>
-                    <span className="font-bold text-gray-800 text-xs">
-                      {bluetoothConfig?.deviceName || 'Not specified yet'}
-                    </span>
-                    {bluetoothConfig?.vehicleReg && (
-                      <span className="text-[10px] text-indigo-600 font-mono font-semibold ml-2 bg-indigo-50 px-1.5 py-0.5 rounded">
-                        {bluetoothConfig.vehicleReg}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-bold text-gray-800 text-xs">
+                        {bluetoothConfig?.deviceName || 'Not specified yet'}
                       </span>
+                      {bluetoothConfig?.deviceMacAddress && (
+                        <span className="text-[10px] font-mono font-bold text-gray-700 bg-gray-100 px-1.5 py-0.5 rounded border border-gray-200">
+                          MAC: {bluetoothConfig.deviceMacAddress}
+                        </span>
+                      )}
+                      {bluetoothConfig?.vehicleReg && (
+                        <span className="text-[10px] text-indigo-700 font-mono font-bold bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">
+                          {bluetoothConfig.vehicleReg}
+                        </span>
+                      )}
+                    </div>
+                    {bluetoothConfig?.vehicleMappings && bluetoothConfig.vehicleMappings.length > 0 && (
+                      <div className="text-[10.5px] text-gray-500 flex items-center gap-1">
+                        <span>Separate devices allocated for {bluetoothConfig.vehicleMappings.length} vehicle(s)</span>
+                      </div>
                     )}
                   </div>
 
@@ -902,10 +1210,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <button
                       type="button"
                       onClick={onOpenBluetoothSetup}
-                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs transition flex items-center space-x-1"
+                      className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs transition flex items-center space-x-1 shrink-0 justify-center"
                     >
                       <Zap size={12} className="fill-current" />
-                      <span>Tasker & iOS Setup</span>
+                      <span>Bluetooth Allocations</span>
                     </button>
                   )}
                 </div>

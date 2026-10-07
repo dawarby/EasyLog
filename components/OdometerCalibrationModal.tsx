@@ -385,6 +385,8 @@ export const OdometerCalibrationModal: React.FC<OdometerCalibrationModalProps> =
           onCancel={() => setShowScanner(false)}
           onScanComplete={handleScanComplete}
           mode="end"
+          title="ATO Dashboard Calibration Scan"
+          autoStartCamera={true}
           prefilledValue={currentAppOdo}
           vehicles={vehicles}
           distanceUnit={distanceUnit}

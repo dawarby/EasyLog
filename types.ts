@@ -43,12 +43,23 @@ export interface VehicleCalibrationStatus {
   intervalDays: number;
 }
 
+export interface VehicleBluetoothMapping {
+  vehicleReg: string;
+  deviceName: string; // Friendly name (e.g. "Toyota Touch 2")
+  deviceMacAddress?: string; // Hardware MAC address or unchanging hardware ID (e.g. "00:1A:7D:DA:71:13")
+  deviceId?: string; // Web Bluetooth persistent identifier or UUID
+  defaultTripType?: 'work' | 'personal';
+  autoEndTrip?: boolean;
+}
+
 export interface BluetoothConfig {
   enabled: boolean;
   deviceName: string;
+  deviceMacAddress?: string; // Primary device MAC address
   vehicleReg: string;
   defaultTripType: 'work' | 'personal';
   autoEndTrip: boolean;
+  vehicleMappings?: VehicleBluetoothMapping[];
 }
 
 export interface TrackingSettings {
