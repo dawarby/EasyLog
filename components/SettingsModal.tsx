@@ -50,7 +50,6 @@ import {
   ChevronUp
 } from 'lucide-react';
 import { Backup, BluetoothConfig } from '../types';
-import { PWAInstallButton } from './PWAInstallButton';
 import { HomeWorkLocationSettings } from './HomeWorkLocationSettings';
 import { isWebBluetoothSupported } from '../services/bluetoothService';
 import {
@@ -85,8 +84,6 @@ interface SettingsModalProps {
   onRestoreSnapshot: (backup: Backup, isExternal: boolean) => void;
   onDownloadSnapshot: (backup: Backup) => void;
   onRestoreFile: (file: File) => void;
-  installPrompt?: any;
-  onInstall?: () => void;
   onArchiveAndReset: () => void;
   vehicles: string[];
   onAddVehicle: (reg: string) => void;
@@ -126,8 +123,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onRestoreSnapshot,
   onDownloadSnapshot,
   onRestoreFile,
-  installPrompt,
-  onInstall,
   onArchiveAndReset,
   vehicles,
   onAddVehicle,
@@ -781,26 +776,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     ))}
                   </div>
                 )}
-              </div>
-
-              {/* Install PWA Mobile App Card */}
-              <div className="bg-indigo-50/70 border border-indigo-200/80 rounded-2xl p-4 space-y-3">
-                <div className="flex items-center space-x-2 text-indigo-900 font-bold text-xs">
-                  <Smartphone size={16} className="text-indigo-600" />
-                  <span>Phone App Installation (PWA)</span>
-                </div>
-                <p className="text-[11px] text-gray-600 leading-relaxed">
-                  Install EasyLog to your phone's home screen for full-screen standalone GPS tracking, offline logging, and instant car launch.
-                </p>
-                <PWAInstallButton variant="modal" />
-                <div className="grid grid-cols-2 gap-2 text-[10px] text-gray-500 pt-1">
-                  <div className="bg-white/80 p-2 rounded-xl border border-indigo-100">
-                    <strong> iPhone:</strong> Tap Safari <strong>Share</strong> button → <strong>Add to Home Screen</strong>.
-                  </div>
-                  <div className="bg-white/80 p-2 rounded-xl border border-indigo-100">
-                    <strong>🤖 Android:</strong> Tap Chrome <strong>Menu (⋮)</strong> → <strong>Install App</strong>.
-                  </div>
-                </div>
               </div>
 
               {/* App Permissions & Standalone Diagnostics Card */}

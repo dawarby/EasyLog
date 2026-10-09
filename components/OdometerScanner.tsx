@@ -28,6 +28,17 @@ import {
   getPermissionHelpGuide
 } from '../services/devicePermissionsService';
 
+// Digital zoom is used when the camera hardware does not expose a zoom capability
+const DIGITAL_MAX_ZOOM = 4;
+const DIGITAL_ZOOM_STEP = 0.5;
+
+interface ZoomRange {
+  min: number;
+  max: number;
+  step: number;
+  hardware: boolean;
+}
+
 interface OdometerScannerProps {
   onScanComplete: (
     value: number,
@@ -110,6 +121,8 @@ export const OdometerScanner: React.FC<OdometerScannerProps> = ({
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [hasTorch, setHasTorch] = useState<boolean>(false);
   const [isTorchOn, setIsTorchOn] = useState<boolean>(false);
+  const [zoomLevel, setZoomLevel] = useState<number>(1);
+  const [zoomRange, setZoomRange] = useState<ZoomRange | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -144,6 +157,8 @@ export const OdometerScanner: React.FC<OdometerScannerProps> = ({
     }
     setIsLiveCameraActive(false);
     setIsTorchOn(false);
+    setZoomRange(null);
+    setZoomLevel(1);
   };
 
   // Start Live Camera Function
@@ -188,6 +203,16 @@ export const OdometerScanner: React.FC<OdometerScannerProps> = ({
       const track = stream.getVideoTracks()[0];
       const capabilities: any = track.getCapabilities?.() || {};
       setHasTorch(Boolean(capabilities.torch));
+
+      // Prefer hardware zoom; otherwise fall back to digital zoom
+      if (capabilities.zoom && capabilities.zoom.max > capabilities.zoom.min) {
+        const { min, max, step } = capabilities.zoom;
+        setZoomRange({ min, max, step: step || 0.1, hardware: true });
+        setZoomLevel(Math.min(Math.max(1, min), max));
+      } else {
+        setZoomRange({ min: 1, max: DIGITAL_MAX_ZOOM, step: DIGITAL_ZOOM_STEP, hardware: false });
+        setZoomLevel(1);
+      }
     } catch (err: any) {
       setIsCameraStarting(false);
       setIsLiveCameraActive(false);
@@ -225,6 +250,22 @@ export const OdometerScanner: React.FC<OdometerScannerProps> = ({
     }
   };
 
+  // Change zoom (hardware via track constraints, digital via CSS scale + crop on capture)
+  const applyZoom = async (next: number) => {
+    if (!zoomRange) return;
+    const clamped = Math.min(zoomRange.max, Math.max(zoomRange.min, Math.round(next * 10) / 10));
+    setZoomLevel(clamped);
+
+    if (zoomRange.hardware && streamRef.current) {
+      const track = streamRef.current.getVideoTracks()[0];
+      try {
+        await (track as any).applyConstraints({ advanced: [{ zoom: clamped }] });
+      } catch (err) {
+        console.warn('Zoom change failed:', err);
+      }
+    }
+  };
+
   // Flip Camera (Front / Rear)
   const flipCamera = () => {
     const nextMode = facingMode === 'environment' ? 'user' : 'environment';
@@ -240,13 +281,20 @@ export const OdometerScanner: React.FC<OdometerScannerProps> = ({
     const width = video.videoWidth || 1280;
     const height = video.videoHeight || 720;
 
+    // With digital zoom, capture only the centre region that is currently on screen
+    const digitalZoom = zoomRange && !zoomRange.hardware ? zoomLevel : 1;
+    const cropWidth = Math.round(width / digitalZoom);
+    const cropHeight = Math.round(height / digitalZoom);
+    const sx = Math.round((width - cropWidth) / 2);
+    const sy = Math.round((height - cropHeight) / 2);
+
     const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
+    canvas.width = cropWidth;
+    canvas.height = cropHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    ctx.drawImage(video, 0, 0, width, height);
+    ctx.drawImage(video, sx, sy, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
     const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
 
     // Stop camera stream once frame is snapped
@@ -507,6 +555,7 @@ export const OdometerScanner: React.FC<OdometerScannerProps> = ({
                     playsInline
                     muted
                     className="w-full h-full object-cover"
+                    style={zoomRange && !zoomRange.hardware ? { transform: `scale(${zoomLevel})` } : undefined}
                   />
 
                   {/* Viewfinder Alignment Guide */}
@@ -549,6 +598,33 @@ export const OdometerScanner: React.FC<OdometerScannerProps> = ({
                       <RotateCw size={15} />
                     </button>
                   </div>
+
+                  {/* Zoom Control */}
+                  {zoomRange && (
+                    <div className="absolute bottom-3 left-3 z-20 flex items-center bg-black/60 backdrop-blur-md border border-white/20 rounded-full text-white text-xs font-bold">
+                      <button
+                        type="button"
+                        onClick={() => applyZoom(zoomLevel - zoomRange.step)}
+                        disabled={zoomLevel <= zoomRange.min}
+                        className="px-3 py-1.5 disabled:opacity-40"
+                        title="Zoom out"
+                        aria-label="Zoom out"
+                      >
+                        −
+                      </button>
+                      <span className="min-w-[2.75rem] text-center tabular-nums">{zoomLevel.toFixed(1)}x</span>
+                      <button
+                        type="button"
+                        onClick={() => applyZoom(zoomLevel + zoomRange.step)}
+                        disabled={zoomLevel >= zoomRange.max}
+                        className="px-3 py-1.5 disabled:opacity-40"
+                        title="Zoom in"
+                        aria-label="Zoom in"
+                      >
+                        +
+                      </button>
+                    </div>
+                  )}
 
                   {/* Bottom Camera Action Bar */}
                   <div className="absolute bottom-3 inset-x-0 flex items-center justify-center px-4 z-20">

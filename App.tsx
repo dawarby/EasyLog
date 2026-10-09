@@ -5,7 +5,6 @@ import { OdometerScanner } from './components/OdometerScanner';
 import { TripEditor } from './components/TripEditor';
 import { SettingsModal, SettingsTab } from './components/SettingsModal';
 import { MissedTripAlert } from './components/MissedTripAlert';
-import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { GpsStartModal } from './components/GpsStartModal';
 import { GpsDriveHud } from './components/GpsDriveHud';
@@ -189,7 +188,6 @@ export default function App() {
   const [externalBackups, setExternalBackups] = useState<Backup[]>([]);
   const [hasExternalStorage, setHasExternalStorage] = useState(false);
   const [connectedFolder, setConnectedFolder] = useState<string | null>(null);
-  const [installPrompt, setInstallPrompt] = useState<any>(null);
   const [backupPermissionNeeded, setBackupPermissionNeeded] = useState(false);
 
   const openSettings = (tab: SettingsTab = 'setup') => {
@@ -353,13 +351,7 @@ export default function App() {
       }
     });
 
-    // 7. Install Prompt Listener
-    window.addEventListener('beforeinstallprompt', (e) => {
-      e.preventDefault();
-      setInstallPrompt(e);
-    });
-
-    // 8. Load Passenger Mode
+    // 7. Load Passenger Mode
     const savedPassenger = localStorage.getItem(STORAGE_KEY_PASSENGER_MODE);
     if (savedPassenger !== null) {
       setPassengerMode(savedPassenger === 'true');
@@ -1715,17 +1707,6 @@ export default function App() {
     showNotification("Disconnected from backup folder", "success");
   };
 
-  const handleInstallClick = () => {
-    if (installPrompt) {
-      installPrompt.prompt();
-      installPrompt.userChoice.then((choiceResult: any) => {
-        if (choiceResult.outcome === 'accepted') {
-          setInstallPrompt(null);
-        }
-      });
-    }
-  };
-
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 pb-20 font-sans">
       
@@ -1754,7 +1735,6 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center space-x-1.5">
-            <PWAInstallButton variant="header" />
             <button
               onClick={() => openCalibration()}
               className={`p-2 rounded-full transition relative ${
@@ -2250,8 +2230,6 @@ export default function App() {
         onRestoreSnapshot={handleRestoreSnapshot}
         onDownloadSnapshot={handleDownloadSnapshot}
         onRestoreFile={handleRestoreFile}
-        installPrompt={installPrompt}
-        onInstall={handleInstallClick}
         onArchiveAndReset={handleArchiveAndReset}
         vehicles={vehicles}
         onAddVehicle={updateVehiclesList}

@@ -11,6 +11,14 @@ async function startServer() {
   app.use(express.json({ limit: "25mb" }));
   app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
+  // Errors that are worth retrying: rate limits, overload and server-side 5xx responses
+  const isTransientAiError = (err: any): boolean => {
+    if (!err) return false;
+    const status = Number(err.status ?? err.code);
+    if (status === 429 || status === 500 || status === 503 || status === 504) return true;
+    return /overloaded|high demand|unavailable|rate limit|try again later/i.test(String(err.message || ""));
+  };
+
   // Lazy initialization of Gemini client
   let aiClient: GoogleGenAI | null = null;
   const getAiClient = () => {
@@ -271,33 +279,54 @@ Rules:
         },
       };
 
-      // Try primary model (gemini-3.8-flash) first, fallback to gemini-flash-latest if high demand or unavailable
-      let response;
+      // Try primary model (gemini-3.8-flash) first, then fall back to gemini-flash-latest.
+      // Transient failures (rate limit, overload, 5xx) are retried with a short backoff before moving on.
       const candidateModels = ["gemini-3.8-flash", "gemini-flash-latest"];
+      const maxAttemptsPerModel = 2;
+      let responseText: string | undefined;
       let lastError: any = null;
 
       for (const modelName of candidateModels) {
-        try {
-          response = await ai.models.generateContent({
-            model: modelName,
-            contents,
-            config,
-          });
-          if (response?.text) {
-            break;
+        for (let attempt = 1; attempt <= maxAttemptsPerModel && !responseText; attempt++) {
+          try {
+            const response = await ai.models.generateContent({
+              model: modelName,
+              contents,
+              config,
+            });
+            if (response?.text?.trim()) {
+              responseText = response.text;
+            } else {
+              lastError = new Error(`Empty response from ${modelName}`);
+            }
+          } catch (err: any) {
+            lastError = err;
+            console.warn(`Model ${modelName} attempt ${attempt} failed:`, err?.message || err);
+            if (!isTransientAiError(err)) break; // Permanent error: try the next model
           }
-        } catch (err: any) {
-          lastError = err;
-          console.warn(`Model ${modelName} failed, trying next candidate if available:`, err?.message || err);
+          if (!responseText && attempt < maxAttemptsPerModel) {
+            await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+          }
         }
+        if (responseText) break;
       }
 
-      if (!response?.text) {
-        throw lastError || new Error("AI service temporarily unavailable. Please retry.");
+      if (!responseText) {
+        const transient = isTransientAiError(lastError);
+        const error: any = lastError || new Error("AI service temporarily unavailable. Please retry.");
+        error.transient = transient;
+        throw error;
       }
 
-      const parsed = JSON.parse(response.text.trim());
-      const mileage = typeof parsed.mileage === "number" ? parsed.mileage : 0;
+      let parsed: { mileage?: unknown; confidence?: string; unit?: string };
+      try {
+        parsed = JSON.parse(responseText.trim());
+      } catch {
+        throw Object.assign(new Error("AI returned an unreadable response. Please retry."), { transient: true });
+      }
+
+      const rawMileage = typeof parsed.mileage === "number" ? parsed.mileage : Number(parsed.mileage);
+      const mileage = Number.isFinite(rawMileage) && rawMileage > 0 ? Math.round(rawMileage) : 0;
 
       return res.json({
         success: mileage > 0,
@@ -318,7 +347,8 @@ Rules:
           errorMessage = err.message;
         }
       }
-      return res.status(500).json({ error: errorMessage });
+      // 503 tells the client the failure is temporary and a retry is worthwhile
+      return res.status(err?.transient ? 503 : 500).json({ error: errorMessage });
     }
   });
 

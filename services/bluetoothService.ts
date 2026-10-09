@@ -340,15 +340,23 @@ export async function connectBleBeacon(
     activeBleDevice = device;
 
     // Listen for disconnect
-    device.addEventListener('gattserverdisconnected', () => {
+    const handleGattDisconnect = () => {
       console.log('BLE Car device disconnected:', device.name);
       activeBleDevice = null;
       onDisconnect();
-    });
+    };
+    device.addEventListener('gattserverdisconnected', handleGattDisconnect);
 
     // Connect to GATT server if possible
     if (device.gatt) {
-      await device.gatt.connect();
+      try {
+        await device.gatt.connect();
+      } catch (connectErr) {
+        // Undo the selection so a failed pairing cannot leave a listener that ends a trip later
+        device.removeEventListener('gattserverdisconnected', handleGattDisconnect);
+        activeBleDevice = null;
+        throw connectErr;
+      }
     }
 
     return {
