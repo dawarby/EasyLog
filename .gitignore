@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+android_native/app/build/
+android_native/build/
+android_native/.gradle/
+
+# Local env and secrets
+.env
+.env.*
+!.env.example
+*.local
+*.keystore
+*.jks
+local.properties
+
+# OS and editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
